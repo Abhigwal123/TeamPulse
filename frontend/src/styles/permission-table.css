@@ -1,0 +1,25 @@
+/* Permission Table Sticky Styles */
+.sticky-header th {
+  position: sticky;
+  top: 0;
+  background-color: #f9fafb; /* bg-gray-50 */
+  z-index: 10;
+}
+
+.sticky-col {
+  position: sticky;
+  left: 0;
+  background-color: #ffffff; /* bg-white */
+  z-index: 5;
+}
+
+/* Ensure sticky header th is above sticky col */
+.sticky-header .sticky-col {
+  z-index: 15;
+  background-color: #f9fafb; /* bg-gray-50 */
+}
+
+
+
+
+
