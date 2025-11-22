@@ -19,7 +19,10 @@ export default function Export() {
       
       console.log('[TRACE] ScheduleManager Export: Loading completed job logs...');
       
+      // Filter for both 'completed' and 'success' statuses (both indicate completed jobs)
       const response = await scheduleService.getJobLogs(1, 50, { status: 'completed' });
+      // Note: Backend filters by exact status match, so we get 'completed' status
+      // If backend supports multiple statuses, we could use: { status: ['completed', 'success'] }
       
       console.log('[TRACE] ScheduleManager Export: Response:', response);
       console.log('[DEBUG] Checking Schedule Logs → count:', response.data?.length || 0);
@@ -172,7 +175,7 @@ export default function Export() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || String(error) || '發生錯誤')}
         </div>
       )}
 

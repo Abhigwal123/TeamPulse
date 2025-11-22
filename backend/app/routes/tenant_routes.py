@@ -12,6 +12,7 @@ except ImportError:
     TenantUpdateSchema = None
     PaginationSchema = None
 from app.utils.security import sanitize_input
+from app.utils.role_utils import is_sys_admin_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,40 +24,30 @@ def get_current_user():
     current_user_id = get_jwt_identity()
     return User.query.get(current_user_id)
 
-def require_admin():
+def require_admin(allow_sysadmin: bool = False):
     """Decorator to require admin role"""
     def decorator(f):
         def decorated_function(*args, **kwargs):
-            # Skip check for OPTIONS requests (CORS preflight)
-            from flask import request
-            if request.method == "OPTIONS":
-                return f(*args, **kwargs)
-            
             user = get_current_user()
-            if not user or not user.is_admin():
+            if not user:
                 return jsonify({'error': 'Admin access required'}), 403
-            return f(*args, **kwargs)
+            if user.is_admin():
+                return f(*args, **kwargs)
+            if allow_sysadmin and is_sys_admin_role(user.role):
+                return f(*args, **kwargs)
+            return jsonify({'error': 'Admin access required'}), 403
         decorated_function.__name__ = f.__name__
         return decorated_function
     return decorator
 
-@tenant_bp.route('/', methods=['GET', 'OPTIONS'])
-@tenant_bp.route('', methods=['GET', 'OPTIONS'])  # Support both / and no slash
+@tenant_bp.route('/', methods=['GET'])
+@tenant_bp.route('', methods=['GET'])  # Support both / and no slash
 @jwt_required()
-@require_admin()
+@require_admin(allow_sysadmin=True)
 def get_tenants():
-    # Handle CORS preflight
     from flask import request, jsonify
     import logging
     trace_logger = logging.getLogger('trace')
-    
-    if request.method == "OPTIONS":
-        trace_logger.info("OPTIONS preflight request for /tenants")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     """
     Get all tenants (admin only)
@@ -82,6 +73,10 @@ def get_tenants():
         pass
     
     try:
+        user = get_current_user()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
         # Parse pagination parameters with safe defaults
         try:
             if SCHEMAS_AVAILABLE and PaginationSchema:
@@ -98,6 +93,9 @@ def get_tenants():
         
         # Query tenants with pagination
         tenants_query = Tenant.query.order_by(Tenant.created_at.desc())
+        if not user.is_admin():
+            tenants_query = tenants_query.filter_by(tenantID=user.tenantID)
+
         tenants_pagination = tenants_query.paginate(
             page=page, 
             per_page=per_page, 
@@ -201,8 +199,9 @@ def get_tenant(tenant_id):
             return jsonify({'error': 'Tenant not found'}), 404
         
         # Check access permissions
-        if not user.is_admin() and user.tenantID != tenant_id:
-            return jsonify({'error': 'Access denied'}), 403
+        if not user.is_admin():
+            if not (is_sys_admin_role(user.role) and user.tenantID == tenant_id):
+                return jsonify({'error': 'Access denied'}), 403
         
         return jsonify({
             'success': True,
@@ -322,8 +321,9 @@ def get_tenant_stats(tenant_id):
             return jsonify({'error': 'User not found'}), 404
         
         # Check access permissions
-        if not user.is_admin() and user.tenantID != tenant_id:
-            return jsonify({'error': 'Access denied'}), 403
+        if not user.is_admin():
+            if not (is_sys_admin_role(user.role) and user.tenantID == tenant_id):
+                return jsonify({'error': 'Access denied'}), 403
         
         # Find tenant
         tenant = Tenant.query.get(tenant_id)
@@ -379,8 +379,9 @@ def get_tenant_users(tenant_id):
             return jsonify({'error': 'User not found'}), 404
         
         # Check access permissions
-        if not user.is_admin() and user.tenantID != tenant_id:
-            return jsonify({'error': 'Access denied'}), 403
+        if not user.is_admin():
+            if not (is_sys_admin_role(user.role) and user.tenantID == tenant_id):
+                return jsonify({'error': 'Access denied'}), 403
         
         # Find tenant
         tenant = Tenant.query.get(tenant_id)

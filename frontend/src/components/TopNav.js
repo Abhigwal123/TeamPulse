@@ -48,9 +48,14 @@ export default function TopNav({ title }) {
           onClick={() => setUserMenuOpen(!userMenuOpen)}
           className="flex items-center text-sm rounded-full focus:outline-none"
         >
-          <span className="mr-2 text-gray-700">
-            你好, {getRoleDisplayName(user?.role)}
-          </span>
+          <div className="mr-3 text-right">
+            <div className="text-gray-900 font-medium">
+              {user?.full_name || user?.username || 'User'}
+            </div>
+            <div className="text-xs text-gray-500">
+              {getRoleDisplayName(user?.role)}
+            </div>
+          </div>
           <div className="h-8 w-8 rounded-full bg-gray-300 flex items-center justify-center">
             <span className="text-gray-600 text-sm font-medium">
               {(user?.full_name || user?.username || 'U').charAt(0).toUpperCase()}
@@ -71,6 +76,7 @@ export default function TopNav({ title }) {
             onClick={(e) => {
               e.preventDefault();
               setUserMenuOpen(false);
+              navigate(ROUTES.PROFILE);
             }}
           >
             個人資料

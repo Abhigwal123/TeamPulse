@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, current_app, redirect, url_for, request
+from flask import Blueprint, jsonify, current_app, redirect, request
 from flask_jwt_extended import jwt_required
 import logging
 
@@ -12,17 +12,39 @@ common_bp = Blueprint("common", __name__)
 # They use a simplified login without database validation
 
 
-@common_bp.route("/health", methods=["GET", "OPTIONS"])
+@common_bp.route("/health", methods=["GET"])
 def health():
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
+    components = {"flask": True, "database": False}
     
-    components = {"flask": True}
+    # CRITICAL: Test database connection - this is what login endpoint needs
+    try:
+        from app import db
+        from sqlalchemy import text
+        db.session.execute(text('SELECT 1'))
+        db.session.commit()
+        components["database"] = True
+    except Exception as db_error:
+        logger.error(f"[HEALTH] Database connection failed: {db_error}")
+        components["database"] = False
+        # Include database diagnostics in response
+        db_uri = current_app.config.get('SQLALCHEMY_DATABASE_URI', 'NOT SET')
+        db_path = current_app.config.get('DATABASE_ABSOLUTE_PATH', 'NOT SET')
+        import os
+        response_data = {
+            "status": "degraded",
+            "components": components,
+            "database_error": str(db_error),
+            "database_uri": db_uri,
+            "database_path": db_path,
+            "database_path_exists": os.path.exists(db_path) if db_path != 'NOT SET' else False,
+            "database_dir_writable": os.access(os.path.dirname(db_path), os.W_OK) if db_path != 'NOT SET' and os.path.exists(os.path.dirname(db_path)) else False
+        }
+        response = jsonify(response_data)
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS, POST, PUT, DELETE")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        return response, 503  # Service Unavailable if database is down
+    
     # Redis/Celery checks are best-effort to avoid blocking startup
     try:
         import redis  # type: ignore
@@ -69,12 +91,6 @@ def list_routes():
         return jsonify({"error": str(e)}), 500
 
 
-@common_bp.route("/login", methods=["GET", "POST"], strict_slashes=False)
-def login_redirect():
-    """Redirect /api/v1/login to /api/v1/auth/login"""
-    return redirect("/api/v1/auth/login", code=301)
-
-
 @common_bp.route("/dashboard", methods=["GET"])
 @jwt_required()
 def unified_dashboard():
@@ -98,7 +114,6 @@ def unified_dashboard():
         role_map = {
             'Client_Admin': '/api/v1/clientadmin/dashboard',
             'ClientAdmin': '/api/v1/clientadmin/dashboard',
-            'SysAdmin': '/api/v1/sysadmin/dashboard',
             'Schedule_Manager': '/api/v1/schedulemanager/dashboard',
             'ScheduleManager': '/api/v1/schedulemanager/dashboard',
             'Department_Employee': '/api/v1/employee/schedule',
@@ -312,7 +327,7 @@ def analytics_user_activity():
 @common_bp.route("/analytics/system-metrics", methods=["GET"])
 @jwt_required()
 def analytics_system_metrics():
-    """System metrics (SysAdmin only)"""
+    """System metrics (ClientAdmin only)"""
     from flask_jwt_extended import get_jwt_identity
     from app.models import User, Tenant, ScheduleDefinition
     
@@ -362,42 +377,6 @@ def data_validate_source():
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@common_bp.route("/data/employee", methods=["POST"])
-@jwt_required()
-def data_employee():
-    """Get employee data"""
-    return jsonify({"success": True, "data": []}), 200
-
-
-@common_bp.route("/data/demand", methods=["POST"])
-@jwt_required()
-def data_demand():
-    """Get demand data"""
-    return jsonify({"success": True, "data": []}), 200
-
-
-@common_bp.route("/data/rules", methods=["POST"])
-@jwt_required()
-def data_rules():
-    """Get rules data"""
-    return jsonify({"success": True, "data": []}), 200
-
-
-@common_bp.route("/data/all", methods=["POST"])
-@jwt_required()
-def data_all():
-    """Get all data types"""
-    return jsonify({
-        "success": True,
-        "data": {
-            "employee": [],
-            "demand": [],
-            "rules": []
-        }
-    }), 200
-
 
 @common_bp.route("/dashboard/chart-data", methods=["GET"])
 @jwt_required()
@@ -456,6 +435,8 @@ def system_health():
     from flask import current_app
     import redis
     from app import db
+    from sqlalchemy import text
+    import os
     
     components = {
         "flask": True,
@@ -482,24 +463,47 @@ def system_health():
         pass
 
     # Check DB connectivity and mark mysql if applicable
+    db_ok = False
+    db_error = None
+    db_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
     try:
-        db.session.execute(db.text("SELECT 1"))
+        db.session.execute(text("SELECT 1"))
         db_ok = True
-    except Exception:
+    except Exception as e:
+        db_error = str(e)
         db_ok = False
+    
     components["database"] = db_ok
     try:
-        uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", "")
-        components["mysql"] = db_ok and ("mysql" in uri.lower())
+        components["mysql"] = db_ok and ("mysql" in db_uri.lower())
     except Exception:
         components["mysql"] = False
     
+    # Extract database path for diagnostics
+    db_path = None
+    db_path_exists = False
+    if db_uri.startswith("sqlite:///"):
+        db_path = db_uri.replace("sqlite:///", "").replace("/", os.sep)
+        db_path = os.path.abspath(db_path)
+        db_path_exists = os.path.exists(db_path)
+    
     status = "ok" if all(components.values()) else "degraded"
     
-    return jsonify({
+    response_data = {
         "status": status,
         "components": components
-    }), 200
+    }
+    
+    # Add diagnostic info if database is failing
+    if not db_ok:
+        response_data["database_diagnostics"] = {
+            "uri": db_uri,
+            "path": db_path,
+            "path_exists": db_path_exists,
+            "error": db_error[:200] if db_error else None
+        }
+    
+    return jsonify(response_data), 200
 
 
 @common_bp.route("/dashboard/schedule-data", methods=["GET"])
@@ -542,16 +546,36 @@ def schedule_user_tasks():
         if not user:
             return jsonify({"error": "User not found"}), 404
         
+        # CRITICAL: Validate user authentication
+        if current_user_id != user.userID:
+            logger.error(f"[CACHE] SECURITY: JWT user_id ({current_user_id}) does not match user.userID ({user.userID})")
+            return jsonify({"error": "User authentication mismatch"}), 403
+        
         # If month parameter is provided, return employee schedule from cache
         month = request.args.get('month')
         if month:
-            logger.info(f"[CACHE] /schedule/ endpoint: Fetching schedule from DB for user {user.userID}, month: {month}")
+            logger.info(f"[CACHE] /schedule/ endpoint: Fetching schedule from DB for user {user.userID} (username: {user.username}, employee_id: {user.employee_id}), month: {month}")
             
             # Get active schedule definition
             schedule_def = ScheduleDefinition.query.filter_by(
                 tenantID=user.tenantID,
                 is_active=True
             ).first()
+            
+            # Ensure data is synced before fetching
+            if schedule_def:
+                from app.utils.sync_guard import ensure_data_synced
+                sync_status = ensure_data_synced(
+                    user_id=current_user_id,
+                    schedule_def_id=schedule_def.scheduleDefID,
+                    employee_id=user.employee_id,
+                    max_age_minutes=30  # Sync if data is older than 30 minutes
+                )
+                # Log sync status for debugging
+                if sync_status.get('synced'):
+                    logger.info(f"[TRACE][SYNC] Auto-sync completed: {sync_status.get('reason', 'N/A')}")
+                elif sync_status.get('used_cache'):
+                    logger.debug(f"[TRACE][SYNC] Using cached data: {sync_status.get('reason', 'N/A')}")
             
             if not schedule_def:
                 return jsonify({
@@ -562,15 +586,22 @@ def schedule_user_tasks():
                     "message": "No active schedule found"
                 }), 200
             
-            # Get cached schedule from database
+            # CRITICAL: Ensure we only fetch schedules for the logged-in user
+            # Use user.userID (not current_user_id) for consistency and validation
             schedules_query = CachedSchedule.get_user_schedule(
-                user_id=current_user_id,
+                user_id=user.userID,  # CRITICAL: Use user.userID to ensure correct filtering
                 schedule_def_id=schedule_def.scheduleDefID,
-                month=month
+                month=month,
+                max_age_hours=0  # Disable age filtering - show all cached data
             )
             
             schedules = []
             for schedule_entry in schedules_query.all():
+                # CRITICAL: Verify each entry belongs to this user
+                if schedule_entry.user_id != user.userID:
+                    logger.error(f"[CACHE] SECURITY ISSUE: Schedule entry {schedule_entry.id} has user_id={schedule_entry.user_id} but expected {user.userID}")
+                    continue  # Skip entries that don't belong to this user
+                
                 schedules.append({
                     "date": schedule_entry.date.isoformat() if schedule_entry.date else None,
                     "shift_type": schedule_entry.shift_type,
@@ -579,42 +610,138 @@ def schedule_user_tasks():
                     "timeRange": schedule_entry.time_range  # Also include camelCase
                 })
             
+            logger.info(f"[CACHE] Returning {len(schedules)} schedule entries for user_id={user.userID} (employee_id={user.employee_id})")
+            
             # Get last sync time
             last_sync = SyncLog.get_last_sync(schedule_def_id=schedule_def.scheduleDefID)
             last_synced_at = last_sync.completed_at.isoformat() if last_sync and last_sync.completed_at else None
             
-            # If cache is empty and no recent sync, trigger background sync
-            if len(schedules) == 0 and (not last_sync or not last_sync.completed_at):
-                logger.info(f"[CACHE] Cache empty for month {month}, triggering background sync")
+            # AUTO-SYNC FALLBACK: If no cached schedule data exists, trigger Celery sync automatically
+            cache_empty = len(schedules) == 0
+            no_sync_exists = not last_sync or not last_sync.completed_at
+            
+            if cache_empty or no_sync_exists:
+                logger.info(f"[AUTO-SYNC] No cached schedule data found for user {current_user_id}, triggering Celery sync")
                 try:
-                    # Trigger async sync (non-blocking)
+                    # Import celery to trigger async task
+                    try:
+                        from app.tasks.celery_app import celery
+                    except ImportError:
+                        try:
+                            from app.extensions import celery
+                        except ImportError:
+                            celery = None
+                    
+                    if celery:
+                        # Trigger Celery task asynchronously (non-blocking)
+                        celery.send_task(
+                            "app.tasks.google_sync.sync_schedule_definition",
+                            args=[schedule_def.scheduleDefID],
+                            kwargs={'force': True}
+                        )
+                        logger.info(f"[AUTO-SYNC] ✅ Celery sync task triggered for schedule {schedule_def.scheduleDefID}")
+                        
+                        # Return 202 Accepted with message indicating auto-sync is running
+                        return jsonify({
+                            "success": False,
+                            "synced": False,  # Not synced yet
+                            "message": "Auto-sync triggered. Schedule will be available soon.",
+                            "auto_sync_triggered": True,
+                            "schedule_def_id": schedule_def.scheduleDefID,
+                            "schedule": [],  # Empty schedule while syncing
+                            "last_synced_at": last_synced_at
+                        }), 202
+                    else:
+                        # Fallback to direct sync if Celery not available
+                        logger.warning("[AUTO-SYNC] Celery not available, falling back to direct sync")
+                        from app.services.google_sheets_sync_service import GoogleSheetsSyncService
+                        creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
+                        sync_service = GoogleSheetsSyncService(creds_path)
+                        import threading
+                        app_instance = current_app._get_current_object()
+                        def sync_in_background():
+                            with app_instance.app_context():
+                                try:
+                                    sync_result = sync_service.sync_schedule_data(
+                                        schedule_def_id=schedule_def.scheduleDefID,
+                                        sync_type='auto',
+                                        triggered_by=current_user_id,
+                                        force=True
+                                    )
+                                    if sync_result.get('success'):
+                                        logger.info(f"[AUTO-SYNC] ✅ Direct sync completed: {sync_result.get('rows_synced', 0)} rows")
+                                except Exception as e:
+                                    logger.error(f"[AUTO-SYNC] Direct sync exception: {e}")
+                        threading.Thread(target=sync_in_background, daemon=True).start()
+                        return jsonify({
+                            "success": False,
+                            "synced": False,  # Not synced yet
+                            "message": "Auto-sync triggered. Schedule will be available soon.",
+                            "auto_sync_triggered": True,
+                            "schedule": [],  # Empty schedule while syncing
+                            "last_synced_at": last_synced_at
+                        }), 202
+                except Exception as e:
+                    logger.error(f"[AUTO-SYNC] Failed to trigger auto-sync: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    # Continue to return empty schedule if auto-sync fails
+            
+            # Trigger daily sync if data is stale (but not empty - handled above)
+            # Sync if: Last sync > 24 hours ago (daily sync)
+            should_sync = SyncLog.should_sync(schedule_def_id=schedule_def.scheduleDefID, min_minutes=1440)  # 24 hours (1 day) threshold for daily sync
+            
+            if should_sync and not cache_empty:
+                logger.info(f"[CACHE] Triggering daily sync: should_sync={should_sync} (last sync > 24h)")
+                try:
+                    # Trigger async sync (non-blocking) - ensure fresh daily data
                     from app.services.google_sheets_sync_service import GoogleSheetsSyncService
                     creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
                     sync_service = GoogleSheetsSyncService(creds_path)
                     # Run sync in background thread (don't wait for it)
                     import threading
+                    app_instance = current_app._get_current_object()
                     def sync_in_background():
-                        try:
-                            sync_service.sync_schedule_data(
-                                schedule_def_id=schedule_def.scheduleDefID,
-                                sync_type='auto',
-                                triggered_by=None,
-                                force=False
-                            )
-                        except Exception as e:
-                            logger.error(f"Background sync failed: {e}")
+                        with app_instance.app_context():
+                            try:
+                                logger.info(f"[CACHE] Starting daily sync for schedule {schedule_def.scheduleDefID}")
+                                from flask_jwt_extended import get_jwt_identity
+                                try:
+                                    current_user_id = get_jwt_identity()
+                                except:
+                                    current_user_id = None
+                                sync_result = sync_service.sync_schedule_data(
+                                    schedule_def_id=schedule_def.scheduleDefID,
+                                    sync_type='on_demand',
+                                    triggered_by=current_user_id,
+                                    force=True
+                                )
+                                if sync_result.get('success'):
+                                    logger.info(f"[CACHE] ✅ Daily sync completed: {sync_result.get('rows_synced', 0)} rows, {sync_result.get('users_synced', 0)} users")
+                                else:
+                                    logger.error(f"[CACHE] ❌ Daily sync failed: {sync_result.get('error', 'Unknown error')}")
+                            except Exception as e:
+                                logger.error(f"[CACHE] Daily sync exception: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
                     threading.Thread(target=sync_in_background, daemon=True).start()
-                    logger.info(f"[CACHE] Background sync triggered for schedule {schedule_def.scheduleDefID}")
+                    logger.info(f"[CACHE] Daily sync triggered for schedule {schedule_def.scheduleDefID}")
                 except Exception as e:
-                    logger.warning(f"[CACHE] Failed to trigger background sync: {e}")
+                    logger.warning(f"[CACHE] Failed to trigger daily sync: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
             
             logger.info(f"[CACHE] Served {len(schedules)} schedule entries from DB via /schedule/ endpoint")
+            
+            # Determine sync status: synced=True if we have schedule data OR if last sync exists
+            is_synced = len(schedules) > 0 or (last_sync is not None and last_sync.completed_at is not None)
             
             return jsonify({
                 "success": True,
                 "month": month,
                 "schedule": schedules,
                 "source": "database",
+                "synced": is_synced,  # True if schedule data exists or sync has occurred
                 "last_synced_at": last_synced_at,
                 "cache_empty": len(schedules) == 0
             }), 200
@@ -633,21 +760,75 @@ def schedule_user_tasks():
         return jsonify({"error": str(e)}), 500
 
 
-@common_bp.route("/admin/sync", methods=["POST", "OPTIONS"])
+@common_bp.route("/sync/trigger", methods=["POST"])
+def trigger_sync_immediate():
+    """
+    Immediate sync trigger endpoint (can be called when changes detected)
+    No authentication required - can be called from webhooks or external systems
+    """
+    try:
+        data = request.get_json() or {}
+        schedule_def_id = data.get('schedule_def_id')
+        
+        from flask import current_app
+        from app.services.google_sheets_sync_service import GoogleSheetsSyncService
+        from app.models import ScheduleDefinition
+        
+        creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
+        sync_service = GoogleSheetsSyncService(creds_path)
+        
+        if schedule_def_id:
+            # Sync specific schedule
+            result = sync_service.sync_schedule_data(
+                schedule_def_id=schedule_def_id,
+                sync_type='on_demand',
+                triggered_by=None,
+                force=True  # Force immediate sync
+            )
+        else:
+            # Sync all active schedules
+            schedules = ScheduleDefinition.query.filter_by(is_active=True).all()
+            results = []
+            for schedule_def in schedules:
+                sync_result = sync_service.sync_schedule_data(
+                    schedule_def_id=schedule_def.scheduleDefID,
+                    sync_type='on_demand',
+                    triggered_by=None,
+                    force=True
+                )
+                results.append({
+                    'schedule_def_id': schedule_def.scheduleDefID,
+                    'schedule_name': schedule_def.scheduleName,
+                    **sync_result
+                })
+            result = {
+                'success': all(r.get('success', False) for r in results),
+                'schedules': results,
+                'total_synced': len([r for r in results if r.get('success', False)])
+            }
+        
+        response = jsonify(result)
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 200
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error triggering immediate sync: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        response = jsonify({"success": False, "error": str(e)})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 500
+
+
+@common_bp.route("/admin/sync", methods=["POST"])
 @jwt_required()
 def sync_google_sheets():
     """Manual sync trigger for Google Sheets to database"""
     from flask_jwt_extended import get_jwt_identity
     from app.utils.auth import role_required
     from app.models import ScheduleDefinition, User, SyncLog
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     try:
         current_user_id = get_jwt_identity()
@@ -663,6 +844,8 @@ def sync_google_sheets():
         schedule_def_id = data.get('schedule_def_id')
         force = data.get('force', False)
         
+        logger.info(f"[TRACE][SYNC] /api/v1/admin/sync called by user {current_user_id}, schedule_def_id={schedule_def_id}, force={force}")
+        
         # Import sync service
         from flask import current_app
         from app.services.google_sheets_sync_service import GoogleSheetsSyncService
@@ -672,12 +855,14 @@ def sync_google_sheets():
         
         if schedule_def_id:
             # Sync specific schedule
+            logger.info(f"[TRACE][SYNC] Triggering manual sync for schedule {schedule_def_id}")
             result = sync_service.sync_schedule_data(
                 schedule_def_id=schedule_def_id,
                 sync_type='manual',
                 triggered_by=current_user_id,
                 force=force
             )
+            logger.info(f"[TRACE][SYNC] Manual sync completed: success={result.get('success')}, rows_synced={result.get('rows_synced', 0)}, users_synced={result.get('users_synced', 0)}")
         else:
             # Sync all active schedules for user's tenant
             schedules = ScheduleDefinition.query.filter_by(
@@ -685,8 +870,11 @@ def sync_google_sheets():
                 is_active=True
             ).all()
             
+            logger.info(f"[TRACE][SYNC] Triggering manual sync for {len(schedules)} active schedules in tenant {user.tenantID}")
+            
             results = []
             for schedule_def in schedules:
+                logger.info(f"[TRACE][SYNC] Syncing schedule: {schedule_def.scheduleName} ({schedule_def.scheduleDefID})")
                 sync_result = sync_service.sync_schedule_data(
                     schedule_def_id=schedule_def.scheduleDefID,
                     sync_type='manual',
@@ -698,12 +886,14 @@ def sync_google_sheets():
                     'schedule_name': schedule_def.scheduleName,
                     **sync_result
                 })
+                logger.info(f"[TRACE][SYNC] Schedule {schedule_def.scheduleName} sync: success={sync_result.get('success')}, rows={sync_result.get('rows_synced', 0)}, users={sync_result.get('users_synced', 0)}")
             
             result = {
                 'success': all(r.get('success', False) for r in results),
                 'schedules': results,
                 'total_synced': len([r for r in results if r.get('success', False)])
             }
+            logger.info(f"[TRACE][SYNC] Manual sync completed for all schedules: {result['total_synced']}/{len(schedules)} successful")
         
         response = jsonify(result)
         response.headers.add("Access-Control-Allow-Origin", "*")
@@ -720,20 +910,12 @@ def sync_google_sheets():
         return response, 500
 
 
-@common_bp.route("/admin/sync/status", methods=["GET", "OPTIONS"])
+@common_bp.route("/admin/sync/status", methods=["GET"])
 @jwt_required()
 def sync_status():
     """Get sync status for schedule definitions"""
     from flask_jwt_extended import get_jwt_identity
     from app.models import User, SyncLog
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     try:
         current_user_id = get_jwt_identity()

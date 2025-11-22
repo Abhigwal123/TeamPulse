@@ -1,18 +1,26 @@
-version: '3.8'
-
 # Production Docker Compose Configuration
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# IMPORTANT: This is an OVERRIDE file - it must be used WITH docker-compose.yml
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# This file overrides production-specific settings:
+# - Removes port exposures (use reverse proxy)
+# - Sets resource limits
+# - Configures restart policies
+# - All database connections inherit charset=utf8mb4 from base docker-compose.yml
 
 services:
+  # MySQL configuration is inherited from docker-compose.yml
+  # It includes: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
   backend:
     environment:
       - FLASK_ENV=production
+      - FLASK_HOST=0.0.0.0  # Bind to all interfaces in Docker
       - DEBUG=False
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-    # Remove debug port exposure in production
-    # ports:
-    #   - "8000:8000"
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      # DATABASE_URL is inherited from docker-compose.yml (includes charset=utf8mb4)
+    # Remove debug port exposure in production (use nginx reverse proxy instead)
+    ports: []  # Remove port exposure in production
     deploy:
       resources:
         limits:
@@ -44,6 +52,9 @@ services:
         max_attempts: 3
 
   celery-beat:
+    environment:
+      - FLASK_ENV=production
+      - DEBUG=False
     deploy:
       resources:
         limits:
@@ -52,19 +63,23 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
 
-  ai-service:
-    environment:
-      - FLASK_ENV=production
-      - DEBUG=False
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
+  # ai-service:
+  #   environment:
+  #     - FLASK_ENV=production
+  #     - DEBUG=False
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '1'
+  #         memory: 1G
+  #       reservations:
+  #         cpus: '0.5'
+  #         memory: 512M
 
   frontend:
     build:
@@ -80,6 +95,8 @@ services:
           memory: 256M
 
   redis:
+    # Remove port exposure in production (only accessible within Docker network)
+    ports: []  # Remove port 6379 exposure in production
     deploy:
       resources:
         limits:
@@ -88,4 +105,9 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
 

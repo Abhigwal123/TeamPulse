@@ -153,8 +153,10 @@ class GoogleSheetsDataProvider(DataProvider):
     
     def _authenticate_and_connect(self):
         """Authenticate with Google Sheets and connect to spreadsheet"""
+        # CRITICAL: Import os locally to avoid UnboundLocalError when executed via exec()
+        import os as _os_provider
         try:
-            if not os.path.exists(self.credentials_path):
+            if not _os_provider.path.exists(self.credentials_path):
                 raise FileNotFoundError(f"Credentials file not found: {self.credentials_path}")
             
             scope = [

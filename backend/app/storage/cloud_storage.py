@@ -6,15 +6,14 @@ import os
 import io
 from typing import Optional, BinaryIO
 from google.cloud import storage
-from ..core.config import settings
 
 
 class CloudStorageManager:
     """Manages cloud storage operations"""
     
     def __init__(self):
-        self.bucket_name = settings.GOOGLE_CLOUD_STORAGE_BUCKET
-        self.project_id = settings.GOOGLE_CLOUD_PROJECT_ID
+        self.bucket_name = os.getenv("GOOGLE_CLOUD_STORAGE_BUCKET")
+        self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
         
         if self.bucket_name and self.project_id:
             try:

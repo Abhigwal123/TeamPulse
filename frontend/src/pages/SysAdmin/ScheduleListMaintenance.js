@@ -5,6 +5,7 @@ import { departmentService } from '../../services/departmentService';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import Modal from '../../components/Modal';
 import Button from '../../components/Button';
+import { normalizeApiError, ensureString } from '../../utils/apiError';
 
 export default function ScheduleListMaintenance() {
   const [schedules, setSchedules] = useState([]);
@@ -29,6 +30,7 @@ export default function ScheduleListMaintenance() {
   });
   const [saving, setSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [runningScheduleId, setRunningScheduleId] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -112,10 +114,9 @@ export default function ScheduleListMaintenance() {
         errorMsg = '登入已過期，請重新登入';
       } else if (!err.response) {
         errorMsg = '無法連接到伺服器，請確認後端服務是否正在運行';
-      } else if (err.response?.data?.error) {
-        errorMsg = err.response.data.error;
-      } else if (err.response?.data?.details) {
-        errorMsg = err.response.data.details;
+      } else {
+        // Use normalizeApiError to ensure we always get a string
+        errorMsg = normalizeApiError(err);
       }
       
       setError(errorMsg);
@@ -192,7 +193,7 @@ export default function ScheduleListMaintenance() {
       
       setTimeout(() => setSuccessMessage(''), 3000);
     } catch (err) {
-      setError(err.response?.data?.error || '儲存班表失敗');
+      setError(normalizeApiError(err) || '儲存班表失敗');
       console.error('Error saving schedule:', err);
     } finally {
       setSaving(false);
@@ -203,6 +204,111 @@ export default function ScheduleListMaintenance() {
   const getDepartmentsForTenant = () => {
     if (!selectedTenant) return departments;
     return departments.filter(d => d.tenantID === selectedTenant);
+  };
+
+  const handleRunSchedule = async (schedule) => {
+    try {
+      setRunningScheduleId(schedule.scheduleDefID);
+      setError('');
+      setSuccessMessage('');
+
+      console.log('[TRACE] Frontend: Running schedule:', schedule.scheduleDefID);
+
+      const response = await scheduleService.runJob({
+        scheduleDefID: schedule.scheduleDefID,
+      });
+
+      // Get the job log ID from the response
+      const jobLogId = response.data?.logID || response.data?.jobLogID || response.data?.log_id;
+      
+      if (jobLogId) {
+        // Poll the job status for a few seconds to check if it fails quickly
+        // This catches errors that happen during execution (e.g., "Error loading input data")
+        let pollCount = 0;
+        const maxPolls = 10; // Poll for up to 5 seconds (10 * 500ms)
+        const pollInterval = 500; // Check every 500ms
+        
+        const checkJobStatus = async () => {
+          try {
+            const jobLogResponse = await scheduleService.getJobLogById(jobLogId);
+            const jobLog = jobLogResponse.data || jobLogResponse;
+            const status = jobLog.status;
+            const errorMessage = jobLog.error_message || jobLog.errorMessage;
+            
+            console.log('[TRACE] Frontend: Job status check:', { status, errorMessage, pollCount });
+            
+            if (status === 'failed') {
+              // Job failed - show the actual error message
+              let errorMsg = errorMessage || '排班作業執行失敗';
+              // Extract the actual error if it's in a specific format
+              if (errorMessage) {
+                // Clean up error message - remove system prefixes and timestamps if present
+                let cleanError = errorMessage;
+                // Remove common prefixes like "[System] 'system' " or similar
+                cleanError = cleanError.replace(/^\[System\]\s*['"]?system['"]?\s*/i, '');
+                // Remove trailing timestamps like "5 小時前" or similar patterns
+                cleanError = cleanError.replace(/\s*\d+\s*(小時前|分鐘前|秒前|hours? ago|minutes? ago|seconds? ago).*$/i, '');
+                
+                if (cleanError.includes('Error loading input data')) {
+                  errorMsg = `載入輸入資料時發生錯誤: ${cleanError}`;
+                } else {
+                  errorMsg = cleanError;
+                }
+              }
+              setError(errorMsg);
+              setTimeout(() => setError(''), 10000); // Show error for 10 seconds
+              setSuccessMessage(''); // Clear any success message
+              return true; // Stop polling
+            } else if (status === 'completed' || status === 'success') {
+              // Job completed successfully
+              setSuccessMessage(`班表 "${schedule.scheduleName}" 排班作業已完成`);
+              setTimeout(() => setSuccessMessage(''), 5000);
+              return true; // Stop polling
+            } else if (status === 'running' || status === 'pending') {
+              // Job is still running - continue polling
+              if (pollCount < maxPolls) {
+                pollCount++;
+                setTimeout(checkJobStatus, pollInterval);
+              } else {
+                // Max polls reached, show that job was started
+                setSuccessMessage(`班表 "${schedule.scheduleName}" 排班作業已啟動（執行中）`);
+                setTimeout(() => setSuccessMessage(''), 5000);
+              }
+              return false; // Continue polling
+            }
+          } catch (pollErr) {
+            console.error('[TRACE] Frontend: Error polling job status:', pollErr);
+            // If polling fails, just show the start message
+            setSuccessMessage(`班表 "${schedule.scheduleName}" 排班作業已啟動`);
+            setTimeout(() => setSuccessMessage(''), 5000);
+            return true; // Stop polling on error
+          }
+        };
+        
+        // Start polling after a short delay
+        setTimeout(checkJobStatus, pollInterval);
+      } else {
+        // No job log ID - just show start message
+        setSuccessMessage(`班表 "${schedule.scheduleName}" 排班作業已啟動`);
+        setTimeout(() => setSuccessMessage(''), 5000);
+      }
+    } catch (err) {
+      console.error('[TRACE] Frontend: Error running schedule:', err);
+      let errorMsg = '啟動排班作業失敗';
+      if (err.response?.status === 403) {
+        errorMsg = '無權限執行此排班作業';
+      } else if (err.response?.status === 404) {
+        errorMsg = '找不到指定的班表';
+      } else if (err.response?.data?.error) {
+        errorMsg = err.response.data.error;
+      } else if (err.response?.data?.details) {
+        errorMsg = err.response.data.details;
+      }
+      setError(errorMsg);
+      setTimeout(() => setError(''), 10000); // Show error for 10 seconds
+    } finally {
+      setRunningScheduleId(null);
+    }
   };
 
   if (loading && schedules.length === 0) {
@@ -258,7 +364,7 @@ export default function ScheduleListMaintenance() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {ensureString(error)}
         </div>
       )}
 
@@ -353,12 +459,35 @@ export default function ScheduleListMaintenance() {
                       {schedule.schedulingAPI || '--'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
-                      <button
-                        onClick={() => handleEdit(schedule)}
-                        className="edit-schedule-btn text-indigo-600 hover:text-indigo-900"
-                      >
-                        編輯
-                      </button>
+                      <div className="flex items-center justify-center gap-3">
+                        <button
+                          onClick={() => handleRunSchedule(schedule)}
+                          disabled={runningScheduleId === schedule.scheduleDefID}
+                          className={`inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white ${
+                            runningScheduleId === schedule.scheduleDefID
+                              ? 'bg-gray-400 cursor-not-allowed'
+                              : 'bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500'
+                          }`}
+                        >
+                          {runningScheduleId === schedule.scheduleDefID ? (
+                            <>
+                              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              執行中...
+                            </>
+                          ) : (
+                            'Run'
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleEdit(schedule)}
+                          className="edit-schedule-btn text-indigo-600 hover:text-indigo-900"
+                        >
+                          編輯
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))

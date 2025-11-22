@@ -19,6 +19,7 @@ from app.services.google_sheets_import import (
     fetch_schedule_data,
     GoogleSheetsService
 )
+from app.utils.role_utils import is_client_admin_role
 
 # Aliases for convenience
 SHEETS_AVAILABLE = sheets_import_module.SHEETS_AVAILABLE
@@ -301,7 +302,14 @@ class DashboardDataService:
                             if part.strip() and part.strip() not in identifiers:
                                 identifiers.append(part.strip())
             
-            # Priority 3: Try user identifiers as fallback
+            # Priority 3: For employees, username IS the employee_id, so prioritize it
+            if user.role and user.role.lower() == 'employee' and user.username:
+                username_upper = str(user.username).strip().upper()
+                if username_upper not in identifiers:
+                    identifiers.insert(0, username_upper)  # Insert at beginning for highest priority
+                    logger.info(f"[TRACE] Added username as employee_id (PRIORITY 3 - HIGH): '{username_upper}' (for employee role)")
+            
+            # Priority 4: Try other user identifiers as fallback
             user_identifiers = [
                 user.username,
                 user.userID,
@@ -496,11 +504,23 @@ class DashboardDataService:
                 return {"success": False, "error": "No active schedule found"}
             
             # Fetch all scheduling data
-            sheets_data = fetch_schedule_data(
-                schedule_def.scheduleDefID,
-                self.credentials_path,
-                user_role="schedulemanager"
-            )
+            # CRITICAL: Get fetch_schedule_data from module to ensure we use the wrapped version
+            current_fetch = sheets_import_module.fetch_schedule_data
+            if current_fetch is None:
+                logger.error("[TRACE] fetch_schedule_data is None! Cannot fetch data.")
+                return {"success": False, "error": "Google Sheets service function not available. Import may have failed."}
+            
+            try:
+                sheets_data = current_fetch(
+                    schedule_def.scheduleDefID,
+                    self.credentials_path,
+                    user_role="schedulemanager"
+                )
+            except Exception as fetch_err:
+                logger.error(f"[TRACE] Exception calling fetch_schedule_data: {fetch_err}")
+                import traceback
+                logger.error(f"[TRACE] Traceback:\n{traceback.format_exc()}")
+                return {"success": False, "error": f"Failed to fetch from Google Sheets: {str(fetch_err)}"}
             
             if not sheets_data.get("success"):
                 return sheets_data
@@ -570,11 +590,23 @@ class DashboardDataService:
                 return {"success": False, "error": "No active schedule found"}
             
             # Fetch only essential data for running
-            sheets_data = fetch_schedule_data(
-                schedule_def.scheduleDefID,
-                self.credentials_path,
-                user_role="schedulemanager"
-            )
+            # CRITICAL: Get fetch_schedule_data from module to ensure we use the wrapped version
+            current_fetch = sheets_import_module.fetch_schedule_data
+            if current_fetch is None:
+                logger.error("[TRACE] fetch_schedule_data is None! Cannot fetch data.")
+                return {"success": False, "error": "Google Sheets service function not available. Import may have failed."}
+            
+            try:
+                sheets_data = current_fetch(
+                    schedule_def.scheduleDefID,
+                    self.credentials_path,
+                    user_role="schedulemanager"
+                )
+            except Exception as fetch_err:
+                logger.error(f"[TRACE] Exception calling fetch_schedule_data: {fetch_err}")
+                import traceback
+                logger.error(f"[TRACE] Traceback:\n{traceback.format_exc()}")
+                return {"success": False, "error": f"Failed to fetch from Google Sheets: {str(fetch_err)}"}
             
             if not sheets_data.get("success"):
                 return sheets_data
@@ -634,11 +666,23 @@ class DashboardDataService:
                 return {"success": False, "error": "No active schedule found"}
             
             # Fetch final output
-            sheets_data = fetch_schedule_data(
-                schedule_def.scheduleDefID,
-                self.credentials_path,
-                user_role="schedulemanager"
-            )
+            # CRITICAL: Get fetch_schedule_data from module to ensure we use the wrapped version
+            current_fetch = sheets_import_module.fetch_schedule_data
+            if current_fetch is None:
+                logger.error("[TRACE] fetch_schedule_data is None! Cannot fetch data.")
+                return {"success": False, "error": "Google Sheets service function not available. Import may have failed."}
+            
+            try:
+                sheets_data = current_fetch(
+                    schedule_def.scheduleDefID,
+                    self.credentials_path,
+                    user_role="schedulemanager"
+                )
+            except Exception as fetch_err:
+                logger.error(f"[TRACE] Exception calling fetch_schedule_data: {fetch_err}")
+                import traceback
+                logger.error(f"[TRACE] Traceback:\n{traceback.format_exc()}")
+                return {"success": False, "error": f"Failed to fetch from Google Sheets: {str(fetch_err)}"}
             
             if not sheets_data.get("success"):
                 return sheets_data
@@ -667,9 +711,9 @@ class DashboardDataService:
             logger.error(f"Error getting D3 dashboard data: {e}")
             return {"success": False, "error": str(e)}
     
-    def get_sysadmin_b1_data(self, user_id: str) -> Dict[str, Any]:
+    def get_client_admin_b1_data(self, user_id: str) -> Dict[str, Any]:
         """
-        B1 SysAdmin Dashboard - Organization overview
+        B1 ClientAdmin Dashboard - Organization overview
         Data from: All sheets (summary view)
         """
         # Try to import again if not available (force retry)
@@ -694,38 +738,46 @@ class DashboardDataService:
             if not user:
                 return {"success": False, "error": "User not found"}
             
-            logger.info(f"[TRACE] get_sysadmin_b1_data - user_id: {user_id}, username: {user.username}")
+            is_client_admin = is_client_admin_role(user.role)
+            logger.info(
+                "[TRACE] get_client_admin_b1_data - user_id: %s, username: %s, is_client_admin: %s",
+                user_id,
+                user.username,
+                is_client_admin,
+            )
             
-            # Get all tenants and schedules from database
-            total_tenants = Tenant.query.count()
-            active_tenants = Tenant.query.filter_by(is_active=True).count()
-            total_schedules = ScheduleDefinition.query.count()
-            active_schedules = ScheduleDefinition.query.filter_by(is_active=True).count()
+            tenant_query = Tenant.query if is_client_admin else Tenant.query.filter_by(tenantID=user.tenantID)
+            schedule_query = ScheduleDefinition.query if is_client_admin else ScheduleDefinition.query.filter_by(tenantID=user.tenantID)
             
-            logger.info(f"[TRACE] Database stats - tenants: {total_tenants}, schedules: {total_schedules}")
+            total_tenants = tenant_query.count()
+            active_tenants = tenant_query.filter_by(is_active=True).count()
+            all_schedules = schedule_query.all()
+            active_schedule_list = [s for s in all_schedules if s.is_active]
             
-            # Get all active schedules for overview
-            schedules = ScheduleDefinition.query.filter_by(is_active=True).all()
-            logger.info(f"[TRACE] Found {len(schedules)} active schedules")
+            logger.info(
+                "[TRACE] Database stats - tenants: %s, schedules (total/active): %s/%s",
+                total_tenants,
+                len(all_schedules),
+                len(active_schedule_list),
+            )
             
-            # Get summary from first schedule (or all if needed)
             summary_data = {}
-            if schedules:
-                schedule_def = schedules[0]
+            if active_schedule_list:
+                schedule_def = active_schedule_list[0]
                 logger.info(f"[TRACE] Fetching sheets data for schedule: {schedule_def.scheduleDefID}")
                 
-                # Get fetch_schedule_data from module (may have changed after import)
                 current_fetch = sheets_import_module.fetch_schedule_data
                 if current_fetch is None:
                     logger.error("[TRACE] fetch_schedule_data is None! Cannot fetch data.")
                     return {"success": False, "error": "Google Sheets service function not available. Import may have failed."}
                 
+                role_for_fetch = "clientadmin" if is_client_admin else "sysadmin"
                 try:
                     sheets_data = current_fetch(
-                    schedule_def.scheduleDefID,
-                    self.credentials_path,
-                    user_role="sysadmin"
-                )
+                        schedule_def.scheduleDefID,
+                        self.credentials_path,
+                        user_role=role_for_fetch
+                    )
                 except Exception as fetch_err:
                     logger.error(f"[TRACE] Exception calling fetch_schedule_data: {fetch_err}")
                     import traceback
@@ -743,17 +795,15 @@ class DashboardDataService:
                         "final_output_rows": sheets.get("final_output", {}).get("rows", 0)
                     }
             
-            tenants = Tenant.query.all()
-            
             return {
                 "success": True,
                 "dashboard": "B1_Organization",
                 "data": {
                     "summary": summary_data,
                     "system_stats": {
-                        "total_tenants": len(tenants),
-                        "active_schedules": len(schedules),
-                        "total_schedule_definitions": len(schedules)
+                        "total_tenants": total_tenants,
+                        "active_schedules": len(active_schedule_list),
+                        "total_schedule_definitions": len(all_schedules)
                     },
                     "sheets_summary": summary_data
                 }
@@ -762,9 +812,9 @@ class DashboardDataService:
             logger.error(f"Error getting B1 dashboard data: {e}")
             return {"success": False, "error": str(e)}
     
-    def get_sysadmin_b2_data(self, user_id: str) -> Dict[str, Any]:
+    def get_client_admin_b2_data(self, user_id: str) -> Dict[str, Any]:
         """
-        B2 Schedule List Maintenance - List all schedules with sheet status
+        B2 ClientAdmin Schedule List Maintenance - List all schedules with sheet status
         Data from: All schedule definitions
         """
         try:
@@ -775,7 +825,11 @@ class DashboardDataService:
             if not user:
                 return {"success": False, "error": "User not found"}
             
-            schedules = ScheduleDefinition.query.all()
+            schedules_query = ScheduleDefinition.query
+            if not is_client_admin_role(user.role):
+                schedules_query = schedules_query.filter_by(tenantID=user.tenantID)
+            
+            schedules = schedules_query.all()
             
             schedule_list = []
             for schedule in schedules:
@@ -801,9 +855,9 @@ class DashboardDataService:
             logger.error(f"Error getting B2 dashboard data: {e}")
             return {"success": False, "error": str(e)}
     
-    def get_sysadmin_b3_data(self, user_id: str, schedule_def_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_client_admin_b3_data(self, user_id: str, schedule_def_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        B3 Schedule Maintenance - Detailed view of schedule sheets
+        B3 ClientAdmin Schedule Maintenance - Detailed view of schedule sheets
         Data from: All 6 sheets for specified schedule
         """
         if not SHEETS_AVAILABLE:
@@ -817,12 +871,16 @@ class DashboardDataService:
             if not user:
                 return {"success": False, "error": "User not found"}
             
+            schedules_query = ScheduleDefinition.query
+            if not is_client_admin_role(user.role):
+                schedules_query = schedules_query.filter_by(tenantID=user.tenantID)
+            
             if schedule_def_id:
-                schedule_def = ScheduleDefinition.query.filter_by(
+                schedule_def = schedules_query.filter_by(
                     scheduleDefID=schedule_def_id
                 ).first()
             else:
-                schedule_def = ScheduleDefinition.query.filter_by(
+                schedule_def = schedules_query.filter_by(
                     is_active=True
                 ).first()
             
@@ -830,11 +888,27 @@ class DashboardDataService:
                 return {"success": False, "error": "No schedule found"}
             
             # Fetch all sheets
-            sheets_data = fetch_schedule_data(
-                schedule_def.scheduleDefID,
-                self.credentials_path,
-                user_role="sysadmin"
-            )
+            role_for_fetch = "clientadmin" if is_client_admin_role(user.role) else "sysadmin"
+            
+            # CRITICAL: Get fetch_schedule_data from module to ensure we use the wrapped version
+            current_fetch = sheets_import_module.fetch_schedule_data
+            if current_fetch is None:
+                logger.error("[TRACE] fetch_schedule_data is None! Cannot fetch data.")
+                return {"success": False, "error": "Google Sheets service function not available. Import may have failed."}
+            
+            try:
+                logger.info(f"[TRACE] 📥 Fetching from Google Sheets API (scheduleDefID: {schedule_def.scheduleDefID})")
+                sheets_data = current_fetch(
+                    schedule_def.scheduleDefID,
+                    self.credentials_path,
+                    user_role=role_for_fetch
+                )
+                logger.info(f"[TRACE] 📥 Google Sheets API response received - success: {sheets_data.get('success')}")
+            except Exception as fetch_err:
+                logger.error(f"[TRACE] Exception calling fetch_schedule_data: {fetch_err}")
+                import traceback
+                logger.error(f"[TRACE] Traceback:\n{traceback.format_exc()}")
+                return {"success": False, "error": f"Failed to fetch from Google Sheets: {str(fetch_err)}"}
             
             return {
                 "success": True,
@@ -1108,9 +1182,9 @@ def get_dashboard_data(dashboard_code: str, user_id: str, schedule_def_id: Optio
     - D1: Schedule Manager Scheduling
     - D2: Schedule Manager Run
     - D3: Schedule Manager Export
-    - B1: SysAdmin Organization
-    - B2: SysAdmin Schedule List
-    - B3: SysAdmin Schedule Maintenance
+        - B1: ClientAdmin Organization
+        - B2: ClientAdmin Schedule List
+        - B3: ClientAdmin Schedule Maintenance
     - C1: Client Admin Tenant
     - C2: Client Admin Department
     - C3: Client Admin User Account
@@ -1123,9 +1197,9 @@ def get_dashboard_data(dashboard_code: str, user_id: str, schedule_def_id: Optio
         "D1": service.get_schedule_manager_d1_data,
         "D2": service.get_schedule_manager_d2_data,
         "D3": service.get_schedule_manager_d3_data,
-        "B1": service.get_sysadmin_b1_data,
-        "B2": service.get_sysadmin_b2_data,
-        "B3": service.get_sysadmin_b3_data,
+        "B1": service.get_client_admin_b1_data,
+        "B2": service.get_client_admin_b2_data,
+        "B3": service.get_client_admin_b3_data,
         "C1": service.get_clientadmin_c1_data,
         "C2": service.get_clientadmin_c2_data,
         "C3": service.get_clientadmin_c3_data,

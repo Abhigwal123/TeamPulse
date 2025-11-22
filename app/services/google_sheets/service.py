@@ -2,7 +2,14 @@
 Google Sheets Service - Core service for reading and writing Google Sheets
 Implements the full flow: Parameters Sheet → Preschedule Sheet → Results Sheet
 """
-import os
+"""
+Google Sheets Service - Core service for reading and writing Google Sheets
+Implements the full flow: Parameters Sheet → Preschedule Sheet → Results Sheet
+"""
+# CRITICAL: Do NOT import os at module level when code is executed via exec()
+# This causes UnboundLocalError. All functions use local imports instead.
+# The module-level import is commented out to prevent UnboundLocalError
+# import os  # REMOVED - causes UnboundLocalError when executed via exec()
 import logging
 import time
 from typing import Dict, Any, Optional, List, Tuple
@@ -39,19 +46,23 @@ class GoogleSheetsService:
         Args:
             credentials_path: Path to service account JSON file
         """
-        self.credentials_path = credentials_path or os.getenv(
+        # CRITICAL: Import os locally to avoid UnboundLocalError when executed via exec()
+        import os as _os_init
+        import sys
+        
+        self.credentials_path = credentials_path or _os_init.getenv(
             "GOOGLE_APPLICATION_CREDENTIALS", 
             "service-account-creds.json"
         )
         
         # If path is relative and doesn't exist, try project root
-        if not os.path.isabs(self.credentials_path) and not os.path.exists(self.credentials_path):
+        if not _os_init.path.isabs(self.credentials_path) and not _os_init.path.exists(self.credentials_path):
             # Calculate project root (assumes we're in app/services/google_sheets/service.py)
-            current_file = os.path.abspath(__file__)
+            current_file = _os_init.path.abspath(__file__)
             # Go up: service.py -> google_sheets -> services -> app -> Project_Up
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_file))))
-            project_creds = os.path.join(project_root, 'service-account-creds.json')
-            if os.path.exists(project_creds):
+            project_root = _os_init.path.dirname(_os_init.path.dirname(_os_init.path.dirname(_os_init.path.dirname(current_file))))
+            project_creds = _os_init.path.join(project_root, 'service-account-creds.json')
+            if _os_init.path.exists(project_creds):
                 self.credentials_path = project_creds
                 logger.info(f"Found credentials at project root: {self.credentials_path}")
         
@@ -65,6 +76,77 @@ class GoogleSheetsService:
         """Generate cache key for spreadsheet + sheet combination"""
         spreadsheet_id = self._extract_spreadsheet_id(spreadsheet_url)
         return f"{spreadsheet_id}:{sheet_name}"
+    
+    def _normalize_chinese_name(self, name: str) -> str:
+        """
+        Normalize Chinese sheet name by removing unwanted spaces
+        
+        RULES:
+        - Do NOT translate any Chinese sheet names
+        - Do NOT rename Chinese sheet names
+        - ONLY remove unwanted internal spaces
+        
+        Examples:
+        - "人 員資料庫" → "人員資料庫"
+        - "硬 性限制" → "硬性限制"
+        - "排 班週期" → "排班週期"
+        - " 每月人力需求表" → "每月人力需求表"
+        
+        Args:
+            name: Original sheet name
+            
+        Returns:
+            Normalized name with spaces removed
+        """
+        if not name:
+            return name
+        # Remove regular spaces and full-width spaces (全角空格)
+        return name.replace(' ', '').replace('　', '').strip()
+    
+    def _ensure_list_of_dicts(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """
+        Global safety wrapper: Ensure all sheet data returns list[dict]
+        
+        This prevents 'int' object has no len() errors and guarantees
+        that every sheet always returns a list of dictionaries.
+        
+        Args:
+            df: pandas DataFrame
+            
+        Returns:
+            List of dictionaries (never int, str, None, or empty dicts)
+        """
+        if df.empty:
+            return []
+        
+        final_rows = []
+        try:
+            raw_records = df.to_dict('records')
+            
+            # Safety check: if raw_records is not a list, return empty
+            if not isinstance(raw_records, list):
+                logger.warning(f"DataFrame.to_dict('records') returned non-list: {type(raw_records)}, returning empty list")
+                return []
+            
+            # Process each row - only keep valid dicts
+            for idx, row in enumerate(raw_records):
+                if isinstance(row, dict):
+                    # Clean dict: remove None keys, skip empty dicts
+                    clean_row = {k: v for k, v in row.items() if k is not None}
+                    if clean_row:  # Only add non-empty rows
+                        final_rows.append(clean_row)
+                else:
+                    # Skip non-dict rows (int, str, None, etc.)
+                    logger.debug(f"Row {idx} is not a dict (type: {type(row)}), skipping")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error converting DataFrame to list[dict]: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return []
+        
+        return final_rows
     
     def _get_cached(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get data from cache if not expired"""
@@ -148,7 +230,10 @@ class GoogleSheetsService:
         if self._credentials:
             return self._credentials
         
-        if not os.path.exists(self.credentials_path):
+        # CRITICAL: Import os locally to avoid UnboundLocalError when executed via exec()
+        import os as _os_creds
+        
+        if not _os_creds.path.exists(self.credentials_path):
             raise FileNotFoundError(
                 f"Google credentials file not found: {self.credentials_path}. "
                 "Please ensure service-account-creds.json exists or set GOOGLE_APPLICATION_CREDENTIALS environment variable."
@@ -330,10 +415,13 @@ class GoogleSheetsService:
             
             logger.info(f"Read {len(df)} rows from Parameters sheet: {worksheet.title}")
             
+            # Use global safety wrapper to ensure list[dict]
+            data_records = self._ensure_list_of_dicts(df)
+            
             return {
                 "success": True,
-                "data": df.to_dict('records') if not df.empty else [],
-                "rows": len(df),
+                "data": data_records,  # Always list[dict]
+                "rows": len(data_records),
                 "columns": list(df.columns) if not df.empty else [],
                 "sheet_name": worksheet.title
             }
@@ -387,10 +475,13 @@ class GoogleSheetsService:
             
             logger.info(f"Read {len(df)} rows from Preschedule sheet: {worksheet.title}")
             
+            # Use global safety wrapper to ensure list[dict]
+            data_records = self._ensure_list_of_dicts(df)
+            
             return {
                 "success": True,
-                "data": df.to_dict('records') if not df.empty else [],
-                "rows": len(df),
+                "data": data_records,  # Always list[dict]
+                "rows": len(data_records),
                 "columns": list(df.columns) if not df.empty else [],
                 "sheet_name": worksheet.title
             }
@@ -451,20 +542,51 @@ class GoogleSheetsService:
             
             spreadsheet = spreadsheet_result
             
+            # Normalize sheet name - remove stray spaces (but NOT translate Chinese)
+            # This handles cases like "人 員資料庫" -> "人員資料庫"
+            normalized_sheet_name = self._normalize_chinese_name(sheet_name) if sheet_name else sheet_name
+            
             try:
-                worksheet = spreadsheet.worksheet(sheet_name)
+                # Try exact name first
+                try:
+                    worksheet = spreadsheet.worksheet(sheet_name)
+                except WorksheetNotFound:
+                    # Try normalized name (without spaces)
+                    if normalized_sheet_name != sheet_name:
+                        try:
+                            worksheet = spreadsheet.worksheet(normalized_sheet_name)
+                            logger.info(f"Found sheet using normalized name: '{normalized_sheet_name}' (original: '{sheet_name}')")
+                        except WorksheetNotFound:
+                            raise  # Re-raise to trigger fallback logic
+                    else:
+                        raise  # Re-raise to trigger fallback logic
             except WorksheetNotFound:
-                # Try alternative names
+                # Try alternative names with normalization
                 all_sheets = [ws.title for ws in spreadsheet.worksheets()]
-                logger.warning(f"Sheet '{sheet_name}' not found. Available sheets: {all_sheets}")
-                result = {
-                    "success": False,
-                    "error": f"Sheet '{sheet_name}' not found. Available: {', '.join(all_sheets)}",
-                    "data": None,
-                    "available_sheets": all_sheets
-                }
-                # Don't cache errors
-                return result
+                # Also try normalized versions of available sheets
+                normalized_available = [s.replace(' ', '') for s in all_sheets]
+                
+                # Check if normalized sheet name matches any available sheet
+                matching_sheet = None
+                for idx, avail_sheet in enumerate(all_sheets):
+                    normalized_avail = self._normalize_chinese_name(avail_sheet)
+                    if normalized_sheet_name == normalized_avail:
+                        matching_sheet = avail_sheet
+                        break
+                
+                if matching_sheet:
+                    worksheet = spreadsheet.worksheet(matching_sheet)
+                    logger.info(f"Found sheet using space-normalized match: '{matching_sheet}' (searched: '{sheet_name}')")
+                else:
+                    logger.warning(f"Sheet '{sheet_name}' not found. Available sheets: {all_sheets}")
+                    result = {
+                        "success": False,
+                        "error": f"Sheet '{sheet_name}' not found. Available: {', '.join(all_sheets)}",
+                        "data": None,
+                        "available_sheets": all_sheets
+                    }
+                    # Don't cache errors
+                    return result
             
             # Use retry logic for reading values (429 errors often happen here)
             def read_values():
@@ -484,10 +606,14 @@ class GoogleSheetsService:
             rows_count = len(df)
             logger.info(f"Read {rows_count} rows from sheet '{sheet_name}': {worksheet.title}")
             
+            # CRITICAL: Global safety wrapper - ensure ALL sheets return list[dict]
+            # This prevents 'int' object has no len() errors
+            data_records = self._ensure_list_of_dicts(df)
+            
             result = {
                 "success": True,
-                "data": df.to_dict('records') if not df.empty else [],
-                "rows": rows_count,
+                "data": data_records,  # Always a list of dicts, never int/str/None
+                "rows": len(data_records),  # Use actual count of valid records
                 "columns": list(df.columns) if not df.empty else [],
                 "sheet_name": worksheet.title
             }
@@ -726,12 +852,18 @@ def fetch_schedule_data(schedule_def_id: str, credentials_path: Optional[str] = 
     Returns:
         Dictionary with all 6 sheets: Parameters, Employee, Preferences, Pre-Schedule, Designation Flow, Final Output
     """
+    # CRITICAL: Import os at function level to avoid UnboundLocalError
+    # When code is executed via exec(), global os declaration might not work correctly
+    # So we import os locally with a different name and use it directly
+    # This completely avoids any issues with global/local variable conflicts
+    import os as _os_func
+    import sys
+    
     try:
         # Import here to avoid circular dependencies
-        import sys
-        # os is already imported at module level
+        # Use _os_func for all os operations to avoid UnboundLocalError
         # Add backend to path if not already there
-        backend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), 'backend')
+        backend_path = _os_func.path.join(_os_func.path.dirname(_os_func.path.dirname(_os_func.path.dirname(_os_func.path.dirname(_os_func.path.abspath(__file__))))), 'backend')
         if backend_path not in sys.path:
             sys.path.insert(0, backend_path)
         
@@ -763,13 +895,31 @@ def fetch_schedule_data(schedule_def_id: str, credentials_path: Optional[str] = 
         main_spreadsheet_url = schedule_def.paramsSheetURL
         results_spreadsheet_url = schedule_def.resultsSheetURL
         
-        # Read all 6 sheets
-        params_data = service.read_parameters_sheet(main_spreadsheet_url)
-        employee_data = service.read_employee_sheet(main_spreadsheet_url)
-        preferences_data = service.read_preferences_sheet(main_spreadsheet_url)
-        preschedule_data = service.read_preschedule_sheet(schedule_def.prefsSheetURL or main_spreadsheet_url)
-        designation_flow_data = service.read_designation_flow_sheet(main_spreadsheet_url)
-        final_output_data = service.read_final_output_sheet(results_spreadsheet_url)
+        # Read ALL sheets using Chinese sheet names
+        # Note: read_sheet_by_name will normalize spaces (remove stray spaces) but NOT translate
+        # Sheet name mapping:
+        #   人員資料庫 -> employee
+        #   員工預排班表 -> preferences
+        #   排班結果表 -> final_output
+        #   軟性限制 -> parameters
+        #   硬性限制 -> hard_constraints
+        #   每月人力需求表 -> monthly_demand
+        #   班別定義表 -> shift_definitions
+        #   排班週期 -> schedule_cycle
+        #   使用說明 -> usage_instructions
+        
+        # Read all required input sheets from main spreadsheet
+        params_data = service.read_sheet_by_name(main_spreadsheet_url, "軟性限制")  # Soft constraints (Parameters)
+        hard_constraints_data = service.read_sheet_by_name(main_spreadsheet_url, "硬性限制")  # Hard constraints
+        employee_data = service.read_sheet_by_name(main_spreadsheet_url, "人員資料庫")  # Employee database
+        preferences_data = service.read_sheet_by_name(main_spreadsheet_url, "員工預排班表")  # Employee pre-schedule
+        schedule_cycle_data = service.read_sheet_by_name(main_spreadsheet_url, "排班週期")  # Schedule cycle
+        monthly_demand_data = service.read_sheet_by_name(main_spreadsheet_url, "每月人力需求表")  # Monthly demand
+        shift_definitions_data = service.read_sheet_by_name(main_spreadsheet_url, "班別定義表")  # Shift definitions
+        usage_instructions_data = service.read_sheet_by_name(main_spreadsheet_url, "使用說明")  # Usage instructions (optional)
+        
+        # Read output sheet from results spreadsheet
+        final_output_data = service.read_sheet_by_name(results_spreadsheet_url, "排班結果表")  # Final Output (Schedule Results)
         
         # Build response with all sheets
         result = {
@@ -777,12 +927,15 @@ def fetch_schedule_data(schedule_def_id: str, credentials_path: Optional[str] = 
             "schedule_def_id": schedule_def_id,
             "schedule_name": schedule_def.scheduleName,
             "sheets": {
-                "parameters": params_data,
-                "employee": employee_data,
-                "preferences": preferences_data,
-                "pre_schedule": preschedule_data,
-                "designation_flow": designation_flow_data,
-                "final_output": final_output_data
+                "parameters": params_data,  # 軟性限制
+                "hard_constraints": hard_constraints_data,  # 硬性限制
+                "employee": employee_data,  # 人員資料庫
+                "preferences": preferences_data,  # 員工預排班表
+                "schedule_cycle": schedule_cycle_data,  # 排班週期
+                "monthly_demand": monthly_demand_data,  # 每月人力需求表
+                "shift_definitions": shift_definitions_data,  # 班別定義表
+                "usage_instructions": usage_instructions_data,  # 使用說明
+                "final_output": final_output_data  # 排班結果表
             }
         }
         
@@ -790,10 +943,12 @@ def fetch_schedule_data(schedule_def_id: str, credentials_path: Optional[str] = 
         if user_role:
             result = _filter_by_role(result, user_role)
         
-        # Overall success if at least Parameters and Pre-Schedule are successful
+        # Overall success if at least critical sheets are successful
+        # Critical sheets: Employee, Preferences, Final Output
         overall_success = (
-            params_data.get("success", False) and 
-            preschedule_data.get("success", False)
+            employee_data.get("success", False) and 
+            preferences_data.get("success", False) and
+            final_output_data.get("success", False)
         )
         result["success"] = overall_success
         

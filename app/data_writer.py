@@ -38,8 +38,10 @@ class GoogleSheetsDataWriter(DataWriter):
     
     def _authenticate_and_connect(self):
         """Authenticate with Google Sheets and connect to spreadsheet"""
+        # CRITICAL: Import os locally to avoid UnboundLocalError when executed via exec()
+        import os as _os_writer
         try:
-            if not os.path.exists(self.credentials_path):
+            if not _os_writer.path.exists(self.credentials_path):
                 raise FileNotFoundError(f"Credentials file not found: {self.credentials_path}")
             
             scope = [
@@ -281,7 +283,9 @@ def write_all_results_to_excel(output_path: str, results_data: Dict[str, Any]) -
                 report_df.to_excel(writer, sheet_name="分析報告與圖表", index=False, header=False)
                 
                 # Add chart if available
-                if "chart_path" in results_data and results_data["chart_path"] and os.path.exists(results_data["chart_path"]):
+                # CRITICAL: Import os locally to avoid UnboundLocalError when executed via exec()
+                import os as _os_writer_chart
+                if "chart_path" in results_data and results_data["chart_path"] and _os_writer_chart.path.exists(results_data["chart_path"]):
                     try:
                         from openpyxl.drawing.image import Image
                         wb = writer.book

@@ -130,7 +130,7 @@ python reset_and_seed_db.py
 ```
 
 This creates:
-- 4 test users (SysAdmin, Client_Admin, Schedule_Manager, Department_Employee)
+- 4 test users (Client_Admin, Client_Admin (legacy), Schedule_Manager, Department_Employee)
 - 1 tenant and 1 department
 - 1 schedule definition with permissions
 

@@ -27,6 +27,14 @@ try:
 except ImportError:
     SyncLog = None
 
+# Schedule model removed - not used
+Schedule = None
+
+try:
+    from app.models.schedule_task import ScheduleTask
+except ImportError:
+    ScheduleTask = None
+
 # Legacy alias for backwards compatibility
 SheetCache = CachedSheetData
 
@@ -41,5 +49,6 @@ __all__ = [
     'EmployeeMapping',
     'SheetCache',
     'CachedSchedule',
-    'SyncLog'
+    'SyncLog',
+    'ScheduleTask'
 ]

@@ -12,6 +12,8 @@ except ImportError:
     DepartmentUpdateSchema = None
     PaginationSchema = None
 from app.utils.security import sanitize_input
+from app.utils.role_utils import is_client_admin_role, is_schedule_manager_role
+from app.utils.tenant_filter import get_tenant_filtered_query
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,29 +30,26 @@ def require_admin_or_scheduler():
     def decorator(f):
         def decorated_function(*args, **kwargs):
             user = get_current_user()
-            if not user or user.role not in ['admin', 'scheduler']:
+            if not user:
+                return jsonify({'error': 'Admin or scheduler access required'}), 403
+            if not (
+                is_client_admin_role(user.role)
+                or is_schedule_manager_role(user.role)
+                or user.role in ['admin', 'scheduler']
+            ):
                 return jsonify({'error': 'Admin or scheduler access required'}), 403
             return f(*args, **kwargs)
         decorated_function.__name__ = f.__name__
         return decorated_function
     return decorator
 
-@department_bp.route('/', methods=['GET', 'OPTIONS'])
-@department_bp.route('', methods=['GET', 'OPTIONS'])  # Support both / and no slash
+@department_bp.route('/', methods=['GET'])
+@department_bp.route('', methods=['GET'])  # Support both / and no slash
 @jwt_required()
 def get_departments():
-    """Get departments for current tenant (or all for SysAdmin)"""
+    """Get departments for current tenant (ClientAdmin can access all tenants)"""
     import logging
     trace_logger = logging.getLogger('trace')
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        trace_logger.info("[TRACE] Backend: OPTIONS preflight for /departments")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     # [TRACE] Logging
     trace_logger.info(f"[TRACE] Backend: GET /departments")
@@ -88,11 +87,8 @@ def get_departments():
             page = int(request.args.get('page', 1) or 1)
             per_page = min(int(request.args.get('per_page', 20) or 20), 100)
         
-        # Query departments - SysAdmin sees all, others see only their tenant
-        if user.role == 'SysAdmin':
-            departments_query = Department.query
-        else:
-            departments_query = Department.query.filter_by(tenantID=user.tenantID)
+        # Query departments - ClientAdmin sees all, others see only their tenant
+        departments_query = get_tenant_filtered_query(Department, user)
         
         # Apply active filter if specified
         active_filter = request.args.get('active')

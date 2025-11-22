@@ -1,69 +1,67 @@
-import axios from 'axios';
+import axios from "axios";
 
-// Detect development environment - check for localhost on any port
-const origin = window.location.origin;
-const isDevelopment = origin.includes('localhost') || origin.includes('127.0.0.1');
+// Hard-set API base URL to match backend CORS settings
+const API_BASE_URL = "http://127.0.0.1:8000/api/v1";
 
-// Determine API base URL
-const baseURL = isDevelopment
-  ? 'http://localhost:8000/api/v1' // Full absolute URL for dev
-  : (import.meta.env.VITE_API_BASE_URL || '/api/v1'); // Relative for production
+// Configure axios defaults
+axios.defaults.withCredentials = true;
+axios.defaults.baseURL = API_BASE_URL;
 
-// Log API configuration with [TRACE] prefix
-console.log('[TRACE] API Base URL:', baseURL);
-console.log('[TRACE] API Config:', { baseURL, isDevelopment, origin, port: window.location.port });
-
-// Create axios instance
 const api = axios.create({
-  baseURL: baseURL,
-  headers: {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  },
-  timeout: 30000, // 30 second timeout
+  baseURL: API_BASE_URL,
+  timeout: 20000,
   withCredentials: true,
 });
 
-// Request interceptor - add auth token
+// Add detailed logging for API base URL
+console.log('[TRACE] API base URL configured:', axios.defaults.baseURL);
+
+// Set Content-Type header (simple header, doesn't trigger preflight)
+api.defaults.headers.common["Content-Type"] = "application/json";
+
+// Request interceptor - add auth token (needed for authenticated endpoints)
+// CRITICAL: Only set Authorization header - do NOT set Origin, Accept, or any CORS headers
+// Browser automatically sets Origin, Accept, and CORS headers - client must NOT set them
 api.interceptors.request.use(
   (config) => {
-    const method = config.method?.toUpperCase() || 'UNKNOWN';
-    const url = config.url || 'unknown';
-    const fullUrl = `${config.baseURL}${url}`;
-    
-    // Get token from localStorage
-    const token = localStorage.getItem('token') || localStorage.getItem('access_token');
+    // Get token from localStorage - support multiple key formats
+    const token = localStorage.getItem('jwt') || 
+                  localStorage.getItem('token') || 
+                  localStorage.getItem('access_token');
     
     if (token) {
+      // Only set Authorization header - this is a simple header that doesn't trigger preflight
       config.headers.Authorization = `Bearer ${token}`;
+      console.log(`[API] Added Authorization header for request to ${config.url}`);
+    } else {
+      // CRITICAL: Don't set "Bearer undefined" - this causes 401 on OPTIONS
+      // If no token, don't set Authorization header at all
+      console.warn(`[API] No token found in localStorage for request to ${config.url} - skipping Authorization header`);
+      // Remove Authorization header if it exists (shouldn't, but be safe)
+      delete config.headers.Authorization;
     }
+    
+    // CRITICAL: Do NOT set these headers (browser controls them):
+    // - Origin (browser sets automatically)
+    // - Accept (browser sets automatically, but we can set simple Accept)
+    // - Access-Control-* (server sets these, NOT client)
+    // - Content-Type (already set as default, only for non-simple requests)
     
     return config;
   },
   (error) => {
-    console.error('[api] Request error:', error);
     return Promise.reject(error);
   }
 );
 
-// Response interceptor - handle errors
+// Response interceptor - handle 401 errors
 api.interceptors.response.use(
   (response) => {
     return response;
   },
   (error) => {
-    // Log network errors
-    if (!error.response) {
-      console.error('[api] Network error:', {
-        message: error.message,
-        code: error.code,
-        url: error.config?.url,
-      });
-      return Promise.reject(error);
-    }
-    
     // Handle 401 Unauthorized
-    if (error.response.status === 401) {
+    if (error.response?.status === 401) {
       const url = error.config?.url || '';
       const isAuthMe = url.includes('/auth/me');
       const isAuthLogin = url.includes('/auth/login');
@@ -71,27 +69,58 @@ api.interceptors.response.use(
       const isLoginPage = window.location.pathname === '/login' || window.location.pathname === '/';
       
       // Don't clear tokens for auth endpoints or when on login page
-      if (isAuthMe || isAuthLogin || isAuthLogout || isLoginPage) {
-        // Just reject - don't clear tokens
-        return Promise.reject(error);
-      }
-      
-      // For protected routes - clear tokens and redirect
-      console.warn('[api] 401 on protected route - clearing tokens');
-      localStorage.removeItem('token');
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('auth');
-      
-      // Redirect to login with small delay
-      if (!isLoginPage) {
-        setTimeout(() => {
-          window.location.href = '/login';
-        }, 100);
+      if (!isAuthMe && !isAuthLogin && !isAuthLogout && !isLoginPage) {
+        // For protected routes - clear tokens and redirect
+        localStorage.removeItem('token');
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('auth');
+        
+        if (!isLoginPage) {
+          setTimeout(() => {
+            window.location.href = '/login';
+          }, 100);
+        }
       }
     }
     
     return Promise.reject(error);
   }
 );
+
+export const fetchMySchedule = async (month, token, options = {}) => {
+  const { page, pageSize, signal } = options;
+  const params = {};
+  if (month) {
+    params.month = month;
+  }
+  if (page) {
+    params.page = page;
+  }
+  if (pageSize) {
+    params.page_size = pageSize;
+  }
+
+  const config = { params };
+
+  if (signal) {
+    config.signal = signal;
+  }
+
+  if (token) {
+    config.headers = {
+      ...(config.headers || {}),
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
+  const response = await api.get('/schedule/my', config);
+  return response.data;
+};
+
+// Employee ID utilities - simplified
+export const getAvailableEmployeeIDs = async () => {
+  const res = await api.get("/employee/available-ids");
+  return res.data;
+};
 
 export default api;

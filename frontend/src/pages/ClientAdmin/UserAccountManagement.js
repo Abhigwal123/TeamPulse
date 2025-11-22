@@ -1,23 +1,29 @@
 import { useState, useEffect } from 'react';
 import { userService } from '../../services/userService';
 import { departmentService } from '../../services/departmentService';
+import { roleService } from '../../services/roleService';
+import { authService } from '../../services/authService';
 import { useAuth } from '../../context/AuthContext';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import Modal from '../../components/Modal';
 import Button from '../../components/Button';
 
-const getRoleBadge = (role) => {
-  const roleMap = {
-    'ScheduleManager': { label: '排班主管', bg: 'bg-blue-100', text: 'text-blue-800' },
-    'Employee': { label: '部門員工', bg: 'bg-gray-100', text: 'text-gray-800' },
-    'ClientAdmin': { label: '客戶管理員', bg: 'bg-purple-100', text: 'text-purple-800' },
-  };
+const getRoleBadge = (role, roleConfigs = []) => {
+  // Find role config from API
+  const roleConfig = roleConfigs.find(r => r.role === role || r.name === role);
+  
+  if (roleConfig && roleConfig.badge) {
+    return (
+      <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${roleConfig.badge.bg} ${roleConfig.badge.text}`}>
+        {roleConfig.label || roleConfig.name || role}
+      </span>
+    );
+  }
 
-  const roleConfig = roleMap[role] || { label: role || '未知', bg: 'bg-gray-100', text: 'text-gray-800' };
-
+  // Fallback for unknown roles
   return (
-    <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${roleConfig.bg} ${roleConfig.text}`}>
-      {roleConfig.label}
+    <span className="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+      {role || '未知'}
     </span>
   );
 };
@@ -38,12 +44,14 @@ const getStatusBadge = (isActive) => {
 };
 
 export default function UserAccountManagement() {
-  const { tenant } = useAuth();
+  const { tenant, user } = useAuth();
   const [users, setUsers] = useState([]);
   const [departments, setDepartments] = useState([]);
+  const [roles, setRoles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   const [formData, setFormData] = useState({
     full_name: '',
@@ -54,11 +62,26 @@ export default function UserAccountManagement() {
     is_active: true,
     password: '',
   });
+  const [registerFormData, setRegisterFormData] = useState({
+    full_name: '',
+    username: '',
+    email: '',
+    password: '',
+    role: 'ScheduleManager',
+  });
   const [saving, setSaving] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [tenantName, setTenantName] = useState(tenant?.tenantName || '機構');
 
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (tenant?.tenantName) {
+      setTenantName(tenant.tenantName);
+    }
+  }, [tenant]);
 
   const loadData = async () => {
     try {
@@ -66,6 +89,11 @@ export default function UserAccountManagement() {
       setError('');
       
       console.log('[TRACE] ClientAdmin User Management: Loading data...');
+      
+      // Load roles first
+      const roleResponse = await roleService.getAll();
+      const roleData = roleResponse?.data || roleResponse || [];
+      setRoles(roleData);
       
       const [userResponse, deptResponse] = await Promise.all([
         userService.getAll(1, 100),
@@ -81,6 +109,7 @@ export default function UserAccountManagement() {
       console.log('[TRACE] ClientAdmin User Management: Data counts:', {
         users: allUsers.length,
         departments: allDepts.length,
+        roles: roleData.length,
       });
 
       // Map users with department names
@@ -102,6 +131,39 @@ export default function UserAccountManagement() {
     }
   };
 
+  // Check if current user can register users
+  const canRegisterUsers = () => {
+    if (!user) return false;
+    const userRole = user.role || '';
+    const allowedRoles = ['ClientAdmin', 'Client_Admin', 'SysAdmin', 'ScheduleManager', 'Schedule_Manager'];
+    return allowedRoles.includes(userRole);
+  };
+
+  // Get available roles for registration based on current user's role
+  const getAvailableRegisterRoles = () => {
+    if (!user) return [];
+    const userRole = user.role || '';
+    
+    if (userRole === 'ClientAdmin' || userRole === 'Client_Admin') {
+      return [
+        { value: 'ClientAdmin', label: '客戶管理員' },
+        { value: 'SysAdmin', label: '系統管理員' },
+        { value: 'ScheduleManager', label: '排班主管' },
+        { value: 'Department_Employee', label: '部門員工' },
+      ];
+    } else if (userRole === 'SysAdmin') {
+      return [
+        { value: 'ScheduleManager', label: '排班主管' },
+        { value: 'Department_Employee', label: '部門員工' },
+      ];
+    } else if (userRole === 'ScheduleManager' || userRole === 'Schedule_Manager') {
+      return [
+        { value: 'Department_Employee', label: '部門員工' },
+      ];
+    }
+    return [];
+  };
+
   const handleCreate = () => {
     setEditingUser(null);
     setFormData({
@@ -116,15 +178,64 @@ export default function UserAccountManagement() {
     setIsModalOpen(true);
   };
 
+  const handleRegister = () => {
+    setRegisterFormData({
+      full_name: '',
+      username: '',
+      email: '',
+      password: '',
+      role: getAvailableRegisterRoles()[0]?.value || 'ScheduleManager',
+    });
+    setIsRegisterModalOpen(true);
+  };
+
+  const handleRegisterSubmit = async () => {
+    try {
+      setRegistering(true);
+      setError('');
+
+      if (!registerFormData.username || !registerFormData.password) {
+        setError('請填寫使用者名稱和密碼');
+        setRegistering(false);
+        return;
+      }
+
+      const registerData = {
+        username: registerFormData.username,
+        password: registerFormData.password,
+        email: registerFormData.email || registerFormData.username,
+        role: registerFormData.role,
+        full_name: registerFormData.full_name,
+      };
+
+      const result = await authService.register(registerData);
+
+      if (result.success) {
+        setIsRegisterModalOpen(false);
+        await loadData();
+        setError('');
+      } else {
+        setError(result.error || '註冊失敗');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || '註冊失敗');
+      console.error('Error registering user:', err);
+    } finally {
+      setRegistering(false);
+    }
+  };
+
   const handleEdit = (user) => {
     setEditingUser(user);
+    // Convert status string to boolean for form
+    const isActive = user.status === 'active' || (user.is_active !== undefined ? user.is_active : true);
     setFormData({
       full_name: user.full_name || '',
       username: user.username || '',
       email: user.email || user.username || '',
       role: user.role || 'ScheduleManager',
       departmentID: user.departmentID || '',
-      is_active: user.is_active !== undefined ? user.is_active : true,
+      is_active: isActive,
       password: '', // Don't prefill password
     });
     setIsModalOpen(true);
@@ -152,8 +263,8 @@ export default function UserAccountManagement() {
         username: formData.username,
         email: formData.email || formData.username,
         role: formData.role,
+        status: formData.is_active ? 'active' : 'inactive', // Convert boolean to string
         departmentID: formData.departmentID || null,
-        is_active: formData.is_active,
       };
 
       if (!editingUser) {
@@ -182,8 +293,6 @@ export default function UserAccountManagement() {
     return <LoadingSpinner />;
   }
 
-  const tenantName = tenant?.tenantName || '機構';
-
   return (
     <div className="bg-gray-100 p-4 md:p-8">
       {/* C3.1: 頂部操作列 */}
@@ -192,20 +301,33 @@ export default function UserAccountManagement() {
           <h1 className="text-3xl font-bold text-gray-900">使用者帳號管理</h1>
           <p className="mt-1 text-sm text-gray-600">管理貴機構 ({tenantName}) 內的所有使用者帳號。</p>
         </div>
-        <button
-          onClick={handleCreate}
-          className="mt-4 md:mt-0 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none"
-        >
-          <svg className="h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
-          </svg>
-          新增使用者
-        </button>
+        <div className="flex gap-2 mt-4 md:mt-0">
+          <button
+            onClick={handleCreate}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none"
+          >
+            <svg className="h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
+            </svg>
+            新增使用者
+          </button>
+          {canRegisterUsers() && (
+            <button
+              onClick={handleRegister}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none"
+            >
+              <svg className="h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M8 9a3 3 0 100-6 3 3 0 000 6zM8 11a6 6 0 016 6H2a6 6 0 016-6zM16 7a1 1 0 10-2 0v1h-1a1 1 0 100 2h1v1a1 1 0 102 0v-1h1a1 1 0 100-2h-1V7z" />
+              </svg>
+              註冊使用者
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || String(error) || '發生錯誤')}
         </div>
       )}
 
@@ -254,7 +376,7 @@ export default function UserAccountManagement() {
                       {user.email || user.username}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {getRoleBadge(user.role)}
+                      {getRoleBadge(user.role, roles)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {user.departmentName}
@@ -327,10 +449,7 @@ export default function UserAccountManagement() {
                     const email = e.target.value;
                     setFormData({ ...formData, email, username: email });
                   }}
-                  readOnly={!!editingUser}
-                  className={`mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm ${
-                    editingUser ? 'bg-gray-50' : ''
-                  }`}
+                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                   placeholder="user@tenant.com"
                   required
                 />
@@ -345,8 +464,18 @@ export default function UserAccountManagement() {
                   onChange={(e) => setFormData({ ...formData, role: e.target.value })}
                   className="mt-1 block w-full px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
                 >
-                  <option value="ScheduleManager">排班主管</option>
-                  <option value="Employee">部門員工</option>
+                  {roles.length > 0 ? (
+                    roles.map((role) => (
+                      <option key={role.role || role.name} value={role.role || role.name}>
+                        {role.label || role.name || role.role}
+                      </option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="ScheduleManager">排班主管</option>
+                      <option value="Employee">部門員工</option>
+                    </>
+                  )}
                 </select>
               </div>
               <div>
@@ -378,23 +507,26 @@ export default function UserAccountManagement() {
                   <option value="inactive">停用</option>
                 </select>
               </div>
-              {!editingUser && (
-                <div>
-                  <label htmlFor="user-password" className="block text-sm font-medium text-gray-700">
-                    密碼
-                  </label>
-                  <input
-                    type="password"
-                    name="user-password"
-                    id="user-password"
-                    value={formData.password}
-                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                    className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                    placeholder="請輸入密碼"
-                    required={!editingUser}
-                  />
-                </div>
-              )}
+              <div>
+                <label htmlFor="user-password" className="block text-sm font-medium text-gray-700">
+                  密碼 {editingUser && <span className="text-gray-500 text-xs">(留空則不更新)</span>}
+                </label>
+                <input
+                  type="password"
+                  name="user-password"
+                  id="user-password"
+                  value={formData.password}
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                  placeholder={editingUser ? "留空則不更新密碼" : "請輸入密碼"}
+                  required={!editingUser}
+                />
+                {editingUser && (
+                  <p className="mt-1 text-xs text-gray-500">
+                    僅在需要更改密碼時填寫，留空則保持原密碼不變
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -415,6 +547,120 @@ export default function UserAccountManagement() {
             className="mt-3 w-full sm:mt-0 sm:ml-3 sm:w-auto"
           >
             取消
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Register User Modal */}
+      <Modal
+        isOpen={isRegisterModalOpen}
+        onClose={() => {
+          setIsRegisterModalOpen(false);
+          setRegisterFormData({
+            full_name: '',
+            username: '',
+            email: '',
+            password: '',
+            role: 'ScheduleManager',
+          });
+        }}
+        title="註冊使用者"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div>
+            <label htmlFor="register-full-name" className="block text-sm font-medium text-gray-700">
+              使用者名稱
+            </label>
+            <input
+              type="text"
+              id="register-full-name"
+              value={registerFormData.full_name}
+              onChange={(e) => setRegisterFormData({ ...registerFormData, full_name: e.target.value })}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              placeholder="請輸入姓名"
+            />
+          </div>
+          <div>
+            <label htmlFor="register-username" className="block text-sm font-medium text-gray-700">
+              登入帳號 (Username) *
+            </label>
+            <input
+              type="text"
+              id="register-username"
+              value={registerFormData.username}
+              onChange={(e) => setRegisterFormData({ ...registerFormData, username: e.target.value })}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              placeholder="請輸入登入帳號"
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="register-email" className="block text-sm font-medium text-gray-700">
+              電子郵件 (Email)
+            </label>
+            <input
+              type="email"
+              id="register-email"
+              value={registerFormData.email}
+              onChange={(e) => setRegisterFormData({ ...registerFormData, email: e.target.value })}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              placeholder="user@example.com"
+            />
+          </div>
+          <div>
+            <label htmlFor="register-password" className="block text-sm font-medium text-gray-700">
+              密碼 *
+            </label>
+            <input
+              type="password"
+              id="register-password"
+              value={registerFormData.password}
+              onChange={(e) => setRegisterFormData({ ...registerFormData, password: e.target.value })}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+              placeholder="請輸入密碼"
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="register-role" className="block text-sm font-medium text-gray-700">
+              角色 *
+            </label>
+            <select
+              id="register-role"
+              value={registerFormData.role}
+              onChange={(e) => setRegisterFormData({ ...registerFormData, role: e.target.value })}
+              className="mt-1 block w-full px-3 py-2 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+            >
+              {getAvailableRegisterRoles().map((role) => (
+                <option key={role.value} value={role.value}>
+                  {role.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setIsRegisterModalOpen(false);
+              setRegisterFormData({
+                full_name: '',
+                username: '',
+                email: '',
+                password: '',
+                role: 'ScheduleManager',
+              });
+            }}
+          >
+            取消
+          </Button>
+          <Button
+            onClick={handleRegisterSubmit}
+            loading={registering}
+          >
+            註冊
           </Button>
         </div>
       </Modal>

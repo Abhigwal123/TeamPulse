@@ -202,6 +202,108 @@ class SchedulePermission(db.Model):
         return cls.query.filter_by(scheduleDefID=schedule_def_id).all()
     
     @classmethod
+    def sync_for_user(cls, user_id: str, entries: List[dict]) -> dict:
+        """
+        Replace all permissions for a user with the provided entries.
+        
+        Args:
+            user_id: Target user ID
+            entries: List of permission payloads containing at minimum scheduleDefID
+        
+        Returns:
+            Summary dictionary containing created/updated/removed counts.
+        """
+        if not user_id:
+            raise ValueError("user_id is required")
+        
+        from app.models import User  # Local import to avoid circular dependency at module load
+        user = User.query.get(user_id)
+        if not user:
+            raise ValueError("User not found")
+        
+        entries = entries or []
+        sanitized_entries = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            schedule_def_id = entry.get('scheduleDefID') or entry.get('scheduleDefId')
+            if not schedule_def_id:
+                continue
+            sanitized_entries[schedule_def_id] = entry
+        
+        existing_permissions = {
+            perm.scheduleDefID: perm for perm in cls.query.filter_by(userID=user_id).all()
+        }
+        
+        created = 0
+        updated = 0
+        removed = 0
+        
+        def parse_bool(value, default=True):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ('true', '1', 'yes', 'y'):
+                    return True
+                if lowered in ('false', '0', 'no', 'n'):
+                    return False
+            return default
+        
+        def parse_datetime(value):
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value)
+                except ValueError:
+                    return None
+            return None
+        
+        for schedule_def_id, entry in sanitized_entries.items():
+            permission = existing_permissions.get(schedule_def_id)
+            can_run = parse_bool(entry.get('canRunJob'), True if not permission else permission.canRunJob)
+            is_active = parse_bool(entry.get('is_active'), True if not permission else permission.is_active)
+            expires_at = parse_datetime(entry.get('expires_at'))
+            granted_by = entry.get('granted_by')
+            tenant_id = entry.get('tenantID') or user.tenantID
+            
+            if permission:
+                permission.canRunJob = can_run
+                permission.is_active = is_active
+                permission.granted_by = granted_by or permission.granted_by
+                if expires_at:
+                    permission.expires_at = expires_at
+                permission.updated_at = datetime.utcnow()
+                updated += 1
+            else:
+                permission = cls(
+                    tenantID=tenant_id,
+                    userID=user_id,
+                    scheduleDefID=schedule_def_id,
+                    canRunJob=can_run,
+                    granted_by=granted_by
+                )
+                permission.is_active = is_active
+                if expires_at:
+                    permission.expires_at = expires_at
+                db.session.add(permission)
+                existing_permissions[schedule_def_id] = permission
+                created += 1
+        
+        for schedule_def_id, permission in existing_permissions.items():
+            if schedule_def_id not in sanitized_entries:
+                db.session.delete(permission)
+                removed += 1
+        
+        return {
+            'created': created,
+            'updated': updated,
+            'removed': removed,
+            'total': created + updated
+        }
+    
+    @classmethod
     def get_by_tenant(cls, tenant_id: str) -> List['SchedulePermission']:
         """
         Get all permissions for a specific tenant

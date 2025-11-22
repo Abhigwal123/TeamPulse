@@ -2,7 +2,7 @@
 # Multi-stage build for optimized production image
 
 # Stage 1: Build
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production=false
+RUN npm ci --only=production=false --legacy-peer-deps || npm install --legacy-peer-deps
 
 # Copy source code
 COPY . .
@@ -21,7 +21,7 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api/v1}
 RUN npm run build
 
 # Stage 2: Production
-FROM nginx:alpine
+FROM nginx:1.25-alpine
 
 # Copy built files from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -34,8 +34,9 @@ EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost/ || exit 1
+    CMD wget --quiet --tries=1 --spider http://localhost/health || exit 1
 
 # Start nginx
 CMD ["nginx", "-g", "daemon off;"]
+
 

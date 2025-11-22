@@ -46,10 +46,10 @@ class UserSchema(BaseSchema):
     """Schema for User model validation and serialization"""
     
     userID = fields.Str(required=False, allow_none=True)
-    tenantID = fields.Str(required=True)
+    tenantID = fields.Str(required=False, allow_none=True)
     username = fields.Str(required=True, validate=validate.Length(min=3, max=100))
     password = fields.Str(required=True, validate=validate.Length(min=8))
-    role = fields.Str(required=True, validate=validate.OneOf(['admin', 'scheduler', 'viewer']))
+    role = fields.Str(required=True, validate=validate.Length(min=2, max=100))
     status = fields.Str(required=False, validate=validate.OneOf(['active', 'inactive', 'suspended']))
     email = fields.Email(allow_none=True)
     full_name = fields.Str(validate=validate.Length(max=255), allow_none=True)
@@ -57,10 +57,10 @@ class UserSchema(BaseSchema):
     @validates_schema
     def validate_username(self, data, **kwargs):
         """Validate username format"""
-        if 'username' in data:
+        if 'username' in data and data['username'] is not None:
             username = data['username'].strip()
-            if not re.match(r'^[a-zA-Z0-9_.-]+$', username):
-                raise ValidationError('Username can only contain letters, numbers, dots, hyphens, and underscores', 'username')
+            if not re.match(r'^[a-zA-Z0-9_.@-]+$', username):
+                raise ValidationError('Username can only contain letters, numbers, dots, hyphens, underscores, and @', 'username')
             data['username'] = username
     
     @validates_schema
@@ -78,11 +78,14 @@ class UserSchema(BaseSchema):
 class UserUpdateSchema(BaseSchema):
     """Schema for updating User model"""
     
-    username = fields.Str(validate=validate.Length(min=3, max=100))
-    role = fields.Str(validate=validate.OneOf(['admin', 'scheduler', 'viewer']))
-    status = fields.Str(validate=validate.OneOf(['active', 'inactive', 'suspended']))
+    username = fields.Str(validate=validate.Length(min=3, max=100), allow_none=True)
+    password = fields.Str(validate=validate.Length(min=6), allow_none=True)  # Optional password update
+    role = fields.Str(allow_none=True)  # Allow any role (validation done in route)
+    status = fields.Str(validate=validate.OneOf(['active', 'inactive', 'suspended']), allow_none=True)
     email = fields.Email(allow_none=True)
     full_name = fields.Str(validate=validate.Length(max=255), allow_none=True)
+    employee_id = fields.Str(allow_none=True)
+    departmentID = fields.Str(allow_none=True)
 
 class UserLoginSchema(BaseSchema):
     """Schema for user login"""
@@ -94,10 +97,13 @@ class DepartmentSchema(BaseSchema):
     """Schema for Department model validation and serialization"""
     
     departmentID = fields.Str(required=False, allow_none=True)
-    tenantID = fields.Str(required=True)
+    tenantID = fields.Str(required=False, allow_none=True)  # Auto-set from current user
     departmentName = fields.Str(required=True, validate=validate.Length(min=1, max=255))
     description = fields.Str(allow_none=True)
     is_active = fields.Bool(required=False, allow_none=True)
+    # Allow managerID/manager_id fields but ignore them (not in model, just for frontend display)
+    managerID = fields.Str(required=False, allow_none=True)
+    manager_id = fields.Str(required=False, allow_none=True)
     
     @validates_schema
     def validate_department_name(self, data, **kwargs):
@@ -111,9 +117,12 @@ class DepartmentSchema(BaseSchema):
 class DepartmentUpdateSchema(BaseSchema):
     """Schema for updating Department model"""
     
-    departmentName = fields.Str(validate=validate.Length(min=1, max=255))
+    departmentName = fields.Str(validate=validate.Length(min=1, max=255), allow_none=True)
     description = fields.Str(allow_none=True)
-    is_active = fields.Bool()
+    is_active = fields.Bool(allow_none=True)
+    # Allow managerID/manager_id fields but ignore them (not in model, just for frontend display)
+    managerID = fields.Str(required=False, allow_none=True)
+    manager_id = fields.Str(required=False, allow_none=True)
 
 class ScheduleDefinitionSchema(BaseSchema):
     """Schema for ScheduleDefinition model validation and serialization"""

@@ -12,6 +12,8 @@ except ImportError:
     ScheduleDefinitionUpdateSchema = None
     PaginationSchema = None
 from app.utils.security import sanitize_input
+from app.utils.role_utils import is_client_admin_role, is_schedule_manager_role
+from app.utils.tenant_filter import get_tenant_filtered_query
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,30 +30,28 @@ def require_admin_or_scheduler():
     def decorator(f):
         def decorated_function(*args, **kwargs):
             user = get_current_user()
-            if not user or user.role not in ['admin', 'scheduler']:
+            if not user:
+                return jsonify({'error': 'Admin or scheduler access required'}), 403
+            if not (
+                is_client_admin_role(user.role)
+                or is_schedule_manager_role(user.role)
+                or user.role in ['admin', 'scheduler']
+            ):
                 return jsonify({'error': 'Admin or scheduler access required'}), 403
             return f(*args, **kwargs)
         decorated_function.__name__ = f.__name__
         return decorated_function
     return decorator
 
-@schedule_definition_bp.route('/', methods=['GET', 'OPTIONS'])
-@schedule_definition_bp.route('', methods=['GET', 'OPTIONS'])  # Support both / and no slash
+@schedule_definition_bp.route('/', methods=['GET'])
+@schedule_definition_bp.route('', methods=['GET'])  # Support both / and no slash
 @jwt_required()
 def get_schedule_definitions():
-    """Get schedule definitions for current tenant (or all for SysAdmin)"""
+    """Get schedule definitions for current tenant (ClientAdmin can access all tenants)"""
     import logging
     trace_logger = logging.getLogger('trace')
     
     # Handle CORS preflight
-    if request.method == "OPTIONS":
-        trace_logger.info("[TRACE] Backend: OPTIONS preflight for /schedule-definitions")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
-    
     # [TRACE] Logging
     trace_logger.info(f"[TRACE] Backend: GET /schedule-definitions")
     trace_logger.info(f"[TRACE] Backend: Path: {request.path}")
@@ -88,11 +88,8 @@ def get_schedule_definitions():
             page = 1
             per_page = 20
         
-        # Query schedule definitions - SysAdmin sees all, others see only their tenant
-        if user.role == 'SysAdmin':
-            definitions_query = ScheduleDefinition.query
-        else:
-            definitions_query = ScheduleDefinition.query.filter_by(tenantID=user.tenantID)
+        # Query schedule definitions - ClientAdmin sees all, others see only their tenant
+        definitions_query = get_tenant_filtered_query(ScheduleDefinition, user)
         
         # Apply department filter if specified
         department_filter = request.args.get('department_id')
@@ -111,7 +108,48 @@ def get_schedule_definitions():
             error_out=False
         )
         
-        definitions = [defn.to_dict() for defn in definitions_pagination.items]
+        # Sync Google Sheets metadata for each schedule definition before returning
+        # This ensures the frontend always gets the latest data from Google Sheets
+        definitions_with_sync = []
+        for defn in definitions_pagination.items:
+            try:
+                # Sync metadata from Google Sheets (non-blocking, graceful fallback)
+                from flask import current_app
+                from app.services.google_sheets_sync_service import GoogleSheetsSyncService
+                
+                creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
+                sync_service = GoogleSheetsSyncService(creds_path)
+                
+                # Sync metadata (fetches from Google Sheets and updates DB)
+                sync_result = sync_service.sync_schedule_definition_metadata(defn, creds_path)
+                
+                if sync_result.get('success'):
+                    logger.info(f"[Google Sheets Sync] Synced metadata for {defn.scheduleName}: {sync_result.get('row_count', 0)} rows")
+                elif sync_result.get('skipped'):
+                    # Gracefully skip if sheets not available - continue with DB data
+                    logger.debug(f"[Google Sheets Sync] Skipped sync for {defn.scheduleName}: {sync_result.get('error', 'Unknown')}")
+                else:
+                    # Log error but continue - don't fail the request
+                    logger.warning(f"[Google Sheets Sync Error] Sync failed for {defn.scheduleName}: {sync_result.get('error', 'Unknown')}")
+            except Exception as sync_err:
+                # Log error but continue - ensure API always returns data
+                logger.warning(f"[Google Sheets Sync Error] Error syncing {defn.scheduleName}: {str(sync_err)}")
+            
+            # Convert to dict (after sync, so metadata is up to date)
+            definitions_with_sync.append(defn.to_dict())
+        
+        definitions = definitions_with_sync
+
+        # Auto-sync: If no schedule definitions found and this is the first page, trigger sync
+        if len(definitions) == 0 and page == 1 and definitions_pagination.total == 0:
+            logger.info("[AUTO-SYNC] No schedule definitions found, checking if schedule data needs syncing...")
+            try:
+                from app.utils.auto_sync import sync_all_active_schedules_if_empty
+                sync_result = sync_all_active_schedules_if_empty(tenant_id=user.tenantID)
+                if sync_result:
+                    logger.info(f"[AUTO-SYNC] Schedule sync result: {sync_result.get('success')}")
+            except Exception as sync_err:
+                logger.warning(f"[AUTO-SYNC] Error during auto-sync: {str(sync_err)}")
 
         import logging
         trace_logger = logging.getLogger('trace')
@@ -274,8 +312,16 @@ def update_schedule_definition(definition_id):
         if 'prefsSheetURL' in data:
             definition.prefsSheetURL = data['prefsSheetURL']
         
+        # Track URL changes to trigger auto-regeneration
+        url_changed = False
         if 'resultsSheetURL' in data:
+            old_url = definition.resultsSheetURL
             definition.resultsSheetURL = data['resultsSheetURL']
+            if old_url != data['resultsSheetURL']:
+                url_changed = True
+                logger.info(f"[SCHEDULE] ResultsSheetURL changed for schedule: {definition.scheduleName}")
+                logger.info(f"[SCHEDULE] Old URL: {old_url}")
+                logger.info(f"[SCHEDULE] New URL: {data['resultsSheetURL']}")
         
         if 'schedulingAPI' in data:
             definition.schedulingAPI = data['schedulingAPI']
@@ -290,6 +336,36 @@ def update_schedule_definition(definition_id):
         db.session.commit()
         
         logger.info(f"Schedule definition updated: {definition.scheduleName} by user: {current_user.username}")
+        
+        # Trigger auto-regeneration if URL changed
+        if url_changed:
+            try:
+                from app.services.auto_regeneration_service import AutoRegenerationService
+                from flask import current_app
+                
+                creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
+                auto_regen_service = AutoRegenerationService(credentials_path=creds_path)
+                
+                # Trigger regeneration in background (non-blocking)
+                import threading
+                def regenerate_in_background():
+                    try:
+                        result = auto_regen_service.validate_and_regenerate(definition.scheduleDefID)
+                        if result.get('regenerated'):
+                            logger.info(f"[SCHEDULE] Auto-regeneration triggered after URL change for schedule: {definition.scheduleName}")
+                        else:
+                            logger.info(f"[SCHEDULE] Auto-regeneration not needed: {result.get('reason', 'unknown')}")
+                    except Exception as e:
+                        logger.error(f"[SCHEDULE] Error during auto-regeneration after URL change: {e}")
+                
+                # Start background thread
+                thread = threading.Thread(target=regenerate_in_background)
+                thread.daemon = True
+                thread.start()
+                logger.info(f"[SCHEDULE] Started background auto-regeneration thread for schedule: {definition.scheduleName}")
+            except Exception as e:
+                logger.warning(f"[SCHEDULE] Failed to trigger auto-regeneration after URL change: {e}")
+                # Don't fail the update request if regeneration fails
         
         return jsonify({
             'success': True,

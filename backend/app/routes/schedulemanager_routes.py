@@ -10,18 +10,10 @@ from app.services.google_io import summarize_sheet_target, get_default_input_url
 schedulemanager_bp = Blueprint("schedulemanager", __name__)
 
 
-@schedulemanager_bp.route("/dashboard", methods=["GET", "OPTIONS"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@schedulemanager_bp.route("/dashboard", methods=["GET"])
+@role_required("ScheduleManager")
 def dashboard():
     """Schedule Manager dashboard with scheduling, run, and export views"""
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
-    
     from flask_jwt_extended import get_jwt_identity
     from app.models import User, ScheduleDefinition, ScheduleJobLog
     import logging
@@ -70,7 +62,7 @@ def dashboard():
 
 
 @schedulemanager_bp.route("/run-task", methods=["POST"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@role_required("ScheduleManager")
 def run_task():
     """Run a scheduling task - redirects to schedule-job-logs/run endpoint"""
     from flask import redirect
@@ -98,21 +90,12 @@ def task_status(task_id: str):
     return jsonify(payload)
 
 
-@schedulemanager_bp.route("/logs", methods=["GET", "OPTIONS"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@schedulemanager_bp.route("/logs", methods=["GET"])
+@role_required("ScheduleManager")
 def logs():
     """Get schedule job logs for current user"""
     import logging
     trace_logger = logging.getLogger('trace')
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        trace_logger.info("[TRACE] Backend: OPTIONS preflight for /schedulemanager/logs")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     trace_logger.info("[TRACE] Backend: GET /schedulemanager/logs")
     trace_logger.info(f"[TRACE] Backend: Query params: {dict(request.args)}")
@@ -175,7 +158,7 @@ def results(sheet_id: str):
 
 
 @schedulemanager_bp.route("/d1-scheduling", methods=["GET"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@role_required("ScheduleManager")
 def d1_scheduling():
     """D1 Scheduling Dashboard - View scheduling data from Google Sheets"""
     from flask_jwt_extended import get_jwt_identity
@@ -201,7 +184,7 @@ def d1_scheduling():
 
 
 @schedulemanager_bp.route("/d2-run", methods=["GET"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@role_required("ScheduleManager")
 def d2_run():
     """D2 Run Dashboard - Data needed to run schedule from Google Sheets"""
     from flask_jwt_extended import get_jwt_identity
@@ -227,7 +210,7 @@ def d2_run():
 
 
 @schedulemanager_bp.route("/d3-export", methods=["GET"])
-@role_required("ScheduleManager", "Schedule_Manager")
+@role_required("ScheduleManager")
 def d3_export():
     """D3 Export Dashboard - Final output from Google Sheets for export"""
     from flask_jwt_extended import get_jwt_identity

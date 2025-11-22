@@ -22,14 +22,27 @@ export default defineConfig({
     sourcemap: 'inline',
   },
   server: {
-    proxy: {
-      // Proxy API requests to backend (optional - can use direct URL too)
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        secure: false,
-      },
-    },
+    port: 5173,
+    host: "localhost", // CRITICAL: Use localhost (not 0.0.0.0) to match backend CORS origin
+    strictPort: false, // Allow port fallback if 5173 is busy
+    // REMOVED: Proxy was intercepting /api requests and causing CORS issues
+    // Frontend now uses full URLs (http://127.0.0.1:8000/api/v1) which bypass proxy
+    // If you need proxy for relative URLs, uncomment and configure properly:
+    // proxy: {
+    //   '/api': {
+    //     target: 'http://127.0.0.1:8000',
+    //     changeOrigin: true,
+    //     secure: false,
+    //     configure: (proxy, _options) => {
+    //       proxy.on('proxyReq', (proxyReq, req, _res) => {
+    //         // Preserve original origin header
+    //         if (req.headers.origin) {
+    //           proxyReq.setHeader('Origin', req.headers.origin);
+    //         }
+    //       });
+    //     },
+    //   },
+    // },
   },
   // Configure to minimize eval usage in development
   css: {

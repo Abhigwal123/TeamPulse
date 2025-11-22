@@ -147,7 +147,7 @@ export default function Dashboard() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || String(error) || '發生錯誤')}
         </div>
       )}
 
