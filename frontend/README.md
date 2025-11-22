@@ -101,7 +101,6 @@ npm run build
 
 ### ScheduleManager Routes (`/schedule-manager/*`)
 - `/schedule-manager/scheduling` - Scheduling
-- `/schedule-manager/run` - Run
 - `/schedule-manager/export` - Export
 
 ### Employee Routes (`/employee/*`)
@@ -127,12 +126,7 @@ The frontend is fully integrated with the Flask backend API:
 
 ## 🔌 Backend Integration
 
-The frontend connects to the Flask backend at `http://localhost:8000/api/v1` by default. Configure this via environment variables:
-
-```bash
-# Create .env file in frontend/
-VITE_API_BASE_URL=http://localhost:8000/api/v1
-```
+The frontend connects to the Flask backend at `http://127.0.0.1:8000/api/v1` (hard-set to match backend CORS settings).
 
 ### API Endpoints Used
 

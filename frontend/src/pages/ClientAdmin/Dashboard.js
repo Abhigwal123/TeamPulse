@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { departmentService } from '../../services/departmentService';
 import { userService } from '../../services/userService';
 import { scheduleService } from '../../services/scheduleService';
+import { alertService } from '../../services/alertService';
 import { ROUTES } from '../../utils/constants';
 import { Link } from 'react-router-dom';
 import LoadingSpinner from '../../components/LoadingSpinner';
@@ -30,31 +31,35 @@ export default function Dashboard() {
       console.log('[TRACE] ClientAdmin Dashboard: Loading data...');
       
       // Fetch all stats in parallel
-      const [deptResponse, userResponse, scheduleResponse] = await Promise.all([
+      const [deptResponse, userResponse, scheduleResponse, alertsResponse] = await Promise.all([
         departmentService.getAll(1, 100),
         userService.getAll(1, 100),
         scheduleService.getDefinitions(1, 100, { active: 'true' }),
+        alertService.getPending().catch(() => ({ data: [] })), // Gracefully handle missing endpoint
       ]);
 
       console.log('[TRACE] ClientAdmin Dashboard: Departments response:', deptResponse);
       console.log('[TRACE] ClientAdmin Dashboard: Users response:', userResponse);
       console.log('[TRACE] ClientAdmin Dashboard: Schedules response:', scheduleResponse);
+      console.log('[TRACE] ClientAdmin Dashboard: Alerts response:', alertsResponse);
 
       const departments = deptResponse.data || [];
       const users = userResponse.data || [];
       const schedules = scheduleResponse.items || scheduleResponse.data || [];
+      const pendingAlerts = Array.isArray(alertsResponse) ? alertsResponse : (alertsResponse?.data || []);
 
       console.log('[TRACE] ClientAdmin Dashboard: Data counts:', {
         departments: departments.length,
         users: users.length,
         schedules: schedules.length,
+        pendingAlerts: pendingAlerts.length,
       });
 
       setStats({
         departments: departments.length,
         users: users.length,
         activeSchedules: schedules.filter(s => s.is_active !== false).length,
-        pendingAlerts: 3, // Placeholder - would come from alerts API
+        pendingAlerts: pendingAlerts.length,
       });
       
       console.log('[TRACE] ClientAdmin Dashboard: Stats set successfully');
@@ -91,7 +96,7 @@ export default function Dashboard() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || String(error) || '發生錯誤')}
         </div>
       )}
 

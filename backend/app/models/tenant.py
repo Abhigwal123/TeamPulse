@@ -96,6 +96,7 @@ class Tenant(db.Model):
         Returns:
             List of recent ScheduleJobLog instances
         """
+        from app.models.schedule_job_log import ScheduleJobLog
         return self.schedule_job_logs.order_by(ScheduleJobLog.startTime.desc()).limit(limit).all()
     
     @classmethod
@@ -130,6 +131,11 @@ class Tenant(db.Model):
     def __str__(self) -> str:
         """Human-readable string representation"""
         return f'{self.tenantName} ({self.tenantID})'
+
+
+
+
+
 
 
 

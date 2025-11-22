@@ -56,7 +56,30 @@ const formatDate = (dateString) => {
   return `${month} 月 ${day} 日`;
 };
 
-const getShiftBadge = (shiftType) => {
+const getShiftBadge = (shiftValue, shiftType) => {
+  // If shiftValue is the actual Excel value (contains Chinese characters or is not a simple code)
+  // Display it directly instead of mapping to generic labels
+  if (shiftValue && shiftValue !== shiftType && shiftValue.length > 1) {
+    // This is the actual shift value from Excel (e.g., "C 櫃台人力", "A 藥局人力")
+    // Determine badge color based on shift type if available
+    const shiftMap = {
+      'D': { bg: 'bg-blue-100', text: 'text-blue-800' },
+      'E': { bg: 'bg-orange-100', text: 'text-orange-800' },
+      'N': { bg: 'bg-indigo-100', text: 'text-indigo-800' },
+      'OFF': { bg: 'bg-gray-100', text: 'text-gray-800' },
+    };
+    
+    const normalizedType = shiftType || 'D';
+    const colors = shiftMap[normalizedType] || { bg: 'bg-gray-100', text: 'text-gray-800' };
+    
+    return (
+      <span className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${colors.bg} ${colors.text}`}>
+        {shiftValue}
+      </span>
+    );
+  }
+  
+  // Fallback to normalized shift type mapping for simple codes
   const shiftMap = {
     'D': { label: '白班 (D)', bg: 'bg-blue-100', text: 'text-blue-800' },
     'E': { label: '小夜 (E)', bg: 'bg-orange-100', text: 'text-orange-800' },
@@ -115,6 +138,7 @@ export default function MyDashboard() {
   const [error, setError] = useState('');
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('尚未同步'); // '尚未同步', '同步中...', '已同步'
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -125,12 +149,12 @@ export default function MyDashboard() {
     checkSyncStatus();
   }, [selectedMonth]);
 
-  const loadSchedule = async () => {
+  const loadSchedule = async (retryCount = 0) => {
     try {
       setLoading(true);
       setError(''); // Clear previous errors
       
-      console.log(`[TRACE] Frontend: Loading schedule for month=${selectedMonth}`);
+      console.log(`[TRACE] Frontend: Loading schedule for month=${selectedMonth} (attempt ${retryCount + 1})`);
       
       // Try new schedule endpoint first
       try {
@@ -141,9 +165,49 @@ export default function MyDashboard() {
         console.log('[DEBUG] Response keys:', response && typeof response === 'object' && !Array.isArray(response) ? Object.keys(response) : 'N/A');
         console.log('[DEBUG] ===================================================');
         
+        // Handle 202 Accepted - Auto-sync triggered
+        if (response && response.auto_sync_triggered && response.message && response.message.includes('Auto-sync triggered')) {
+          console.log('[AUTO-SYNC] Backend triggered auto-sync, will retry in 30 seconds');
+          setSyncStatus('同步中...');
+          setIsSyncing(true);
+          setError(''); // Clear error - show sync message instead
+          
+          // Auto-retry after 30 seconds (max 5 retries = 2.5 minutes)
+          if (retryCount < 5) {
+            setTimeout(() => {
+              console.log(`[AUTO-SYNC] Retrying schedule fetch (attempt ${retryCount + 2})`);
+              loadSchedule(retryCount + 1);
+            }, 30000); // 30 seconds
+          } else {
+            console.warn('[AUTO-SYNC] Max retries reached, showing error');
+            setError('班表同步時間過長，請稍後手動重新整理');
+            setIsSyncing(false);
+            setSyncStatus('尚未同步');
+            setLoading(false);
+          }
+          return;
+        }
+        
+        // Handle raw_data from Google Sheets fallback
+        if (response && response.raw_data && response.source === 'google_sheets') {
+          console.log('[TRACE] Frontend: Received raw_data from Google Sheets, parsing...');
+          const parsedSchedules = parseScheduleData({ data: { my_schedule: response.raw_data } }, user);
+          setScheduleData(parsedSchedules);
+          setLoading(false);
+          setError('');
+          return;
+        }
+        
         if (response && response.success !== false) {
           // Handle both old and new response formats
-          const schedule = response.schedule || response.data?.schedule || [];
+          const scheduleSource = Array.isArray(response)
+            ? response
+            : response.entries ||
+              response.schedule ||
+              response.data?.entries ||
+              response.data?.schedule ||
+              [];
+          const schedule = Array.isArray(scheduleSource) ? scheduleSource : [];
           console.log(`[TRACE] Frontend: Schedule endpoint returned ${schedule.length} entries`);
           console.log(`[TRACE] Frontend: Response structure:`, {
             success: response.success,
@@ -152,9 +216,16 @@ export default function MyDashboard() {
             metadata: response.metadata
           });
           
-          // Update sync status
+          // Update sync status based on backend response
           if (response.last_synced_at) {
             setLastSyncedAt(response.last_synced_at);
+          }
+          
+          // Determine sync status: if synced=true from backend OR if schedule data exists
+          const isSynced = response.synced === true || schedule.length > 0;
+          if (isSynced) {
+            setSyncStatus('已同步');
+            setIsSyncing(false);
           }
           
           if (schedule.length > 0) {
@@ -169,10 +240,28 @@ export default function MyDashboard() {
                 dateStr = dateStr.replace(/\//g, '-');
               }
               
+              // CRITICAL: Use actual shift value from Excel (e.g., "C 櫃台人力", "A 藥局人力")
+              // Fallback to normalized shift_type only if shift is not available
+              const actualShift = entry.shift || entry.shift_value || entry.shiftValue;
+              const normalizedShiftType = entry.shift_type || entry.shiftType || entry.shift_code || entry.shiftCode;
+              
+              // Use actual shift value if available, otherwise use normalized type
+              const shiftDisplay = actualShift || normalizedShiftType || 'D';
+              
+              let timeRange = entry.time_range || entry.timeRange;
+              if (!timeRange && (entry.start_time || entry.end_time)) {
+                const start = entry.start_time || '--';
+                const end = entry.end_time || '--';
+                if (start !== '--' || end !== '--') {
+                  timeRange = `${start || '--'} - ${end || '--'}`;
+                }
+              }
+
               return {
                 date: dateStr,
-                shiftType: entry.shift_type || entry.shiftType || 'D',
-                timeRange: entry.time_range || entry.timeRange || getTimePeriod(entry.shift_type || entry.shiftType || 'D'),
+                shift: shiftDisplay,  // Store actual shift value from Excel
+                shiftType: normalizedShiftType || 'D',  // Keep normalized type for time range calculation
+                timeRange: timeRange || getTimePeriod(normalizedShiftType || 'D', entry.time_range || entry.timeRange),
               };
             });
             
@@ -181,7 +270,9 @@ export default function MyDashboard() {
             console.log(`[TRACE] Frontend: First transformed entry:`, schedules[0]);
             
             setScheduleData(schedules);
-            setError(''); // Clear error
+            setError(''); // Clear error - data exists, no error
+            setIsSyncing(false); // Clear syncing state
+            setSyncStatus('已同步'); // Mark as synced when data exists
             console.log(`[DEBUG] ========== FINAL SCHEDULE DATA SET ==========`);
             console.log(`[DEBUG] Total schedules:`, schedules.length);
             if (schedules.length > 0) {
@@ -194,41 +285,76 @@ export default function MyDashboard() {
             return;
           } else {
             console.warn('[TRACE] Frontend: Schedule endpoint returned empty schedule array');
+            setScheduleData([]);
+            
+            // Update sync status: if backend says synced=true, mark as synced even if empty
+            if (response.synced === true) {
+              setSyncStatus('已同步');
+              setIsSyncing(false);
+              setError(''); // No error - data was synced, just empty for this month
+            } else {
+              setSyncStatus('尚未同步');
+            }
+            
             // Check if there's a helpful message
             if (response.message) {
               console.log(`[TRACE] Frontend: Response message: ${response.message}`);
-              setError(response.message);
+              // Only show error if not synced - if synced but empty, that's OK
+              if (response.synced !== true) {
+                setError(response.message);
+              } else {
+                setError(''); // Synced but empty - no error
+              }
             } else if (response.available_months && response.available_months.length > 0) {
               const msg = `目前沒有 ${selectedMonth} 的班表資料。可用月份：${response.available_months.join(', ')}`;
-              setError(msg);
+              // Only show as error if not synced
+              if (response.synced !== true) {
+                setError(msg);
+              } else {
+                setError(''); // Synced but empty - no error
+              }
             } else {
-              setScheduleData([]);
-              setError(''); // Clear error - empty is OK, just show "目前沒有班表資料" in UI
+              setError(''); // Clear error - empty is OK if synced, just show "目前沒有班表資料" in UI
             }
           }
         } else if (response && (response.success === false || response.error)) {
           console.error(`[TRACE] Frontend: Schedule endpoint error - ${response.error || 'Unknown error'}`);
           
-          // Enhanced error messages
-          let errorMsg = response.error || '無法載入班表資料，請稍後再試';
+          // Only show error if we don't have schedule data
+          // If schedule data exists, don't show error even if success=false
+          const hasScheduleData =
+            (Array.isArray(response.entries) && response.entries.length > 0) ||
+            (Array.isArray(response.schedule) && response.schedule.length > 0) ||
+            (Array.isArray(response.data?.entries) && response.data.entries.length > 0) ||
+            (Array.isArray(response.data?.schedule) && response.data.schedule.length > 0);
           
-          if (response.error && response.error.includes('Google Sheets service not available')) {
-            errorMsg = '無法連接到 Google Sheets 服務，請聯絡系統管理員';
-          } else if (response.error && (response.error.includes('not found') || response.error.includes('404'))) {
-            errorMsg = `無法找到 Google Sheets 資料：${response.error}`;
-          } else if (response.error && response.error.includes('Failed sheets')) {
-            errorMsg = `Google Sheets 讀取失敗：${response.error}`;
-          } else if (response.details) {
-            // Show specific sheet errors if available
-            const failedSheets = Object.entries(response.details.sheets || {})
-              .filter(([_, data]) => data && !data.success)
-              .map(([name, data]) => `${name}: ${data.error || 'Unknown error'}`);
-            if (failedSheets.length > 0) {
-              errorMsg = `無法讀取以下工作表：${failedSheets.join(', ')}`;
+          if (!hasScheduleData) {
+            // Enhanced error messages
+            let errorMsg = response.error || '載入班表資料失敗';
+            
+            if (response.error && response.error.includes('Google Sheets service not available')) {
+              errorMsg = '無法連接到 Google Sheets 服務，請聯絡系統管理員';
+            } else if (response.error && (response.error.includes('not found') || response.error.includes('404'))) {
+              errorMsg = `無法找到 Google Sheets 資料：${response.error}`;
+            } else if (response.error && response.error.includes('Failed sheets')) {
+              errorMsg = `Google Sheets 讀取失敗：${response.error}`;
+            } else if (response.details) {
+              // Show specific sheet errors if available
+              const failedSheets = Object.entries(response.details.sheets || {})
+                .filter(([_, data]) => data && !data.success)
+                .map(([name, data]) => `${name}: ${data.error || 'Unknown error'}`);
+              if (failedSheets.length > 0) {
+                errorMsg = `無法讀取以下工作表：${failedSheets.join(', ')}`;
+              }
             }
+            
+            setError(errorMsg);
+            setSyncStatus('尚未同步');
+          } else {
+            // Data exists, no error
+            setError('');
+            setSyncStatus('已同步');
           }
-          
-          setError(errorMsg);
         } else {
           console.warn('[TRACE] Frontend: Unexpected response structure:', response);
           console.warn('[TRACE] Frontend: Response keys:', Object.keys(response || {}));
@@ -249,7 +375,7 @@ export default function MyDashboard() {
         
         if (!scheduleErr.response) {
           // Network error - backend not reachable
-          errorMsg = '無法連接到伺服器，請確認後端服務是否正在運行 (http://localhost:8000)';
+          errorMsg = '無法連接到伺服器，請確認後端服務是否正在運行 (http://127.0.0.1:8000)';
           console.error('[TRACE] Frontend: Network/CORS error - backend may not be running');
         } else if (scheduleErr.response.status === 500) {
           const errorData = scheduleErr.response.data;
@@ -312,23 +438,39 @@ export default function MyDashboard() {
         } else if (response.error) {
           // Backend returned an error
           console.error('[TRACE] Frontend: Backend returned error:', response.error);
-          // Check if it's the Google Sheets service error
-          if (response.error.includes('Google Sheets service not available')) {
-            setError('無法連接到 Google Sheets 服務，請聯絡系統管理員');
-          } else {
-            setError(response.error || '載入班表資料失敗');
-          }
           
-          // Try fallback endpoint
-          console.log('🔄 Trying fallback schedule endpoint...');
-          try {
-            const fallbackResponse = await employeeService.getMySchedule(selectedMonth);
-            if (fallbackResponse && fallbackResponse.schedule && fallbackResponse.schedule.length > 0) {
-              setScheduleData(fallbackResponse.schedule);
-              setError(''); // Clear error if fallback worked
+          // Only show error if we don't have schedule data
+          const hasScheduleData =
+            (Array.isArray(response.entries) && response.entries.length > 0) ||
+            (Array.isArray(response.schedule) && response.schedule.length > 0) ||
+            (Array.isArray(response.data?.entries) && response.data.entries.length > 0) ||
+            (Array.isArray(response.data?.schedule) && response.data.schedule.length > 0);
+          
+          if (!hasScheduleData) {
+            // Check if it's the Google Sheets service error
+            if (response.error.includes('Google Sheets service not available')) {
+              setError('無法連接到 Google Sheets 服務，請聯絡系統管理員');
+            } else {
+              setError(response.error || '載入班表資料失敗');
             }
-          } catch (fallbackErr) {
-            console.error('Fallback also failed:', fallbackErr);
+            setSyncStatus('尚未同步');
+            
+            // Try fallback endpoint
+            console.log('🔄 Trying fallback schedule endpoint...');
+            try {
+              const fallbackResponse = await employeeService.getMySchedule(selectedMonth);
+              if (fallbackResponse && fallbackResponse.schedule && fallbackResponse.schedule.length > 0) {
+                setScheduleData(fallbackResponse.schedule);
+                setError(''); // Clear error if fallback worked
+                setSyncStatus('已同步');
+              }
+            } catch (fallbackErr) {
+              console.error('Fallback also failed:', fallbackErr);
+            }
+          } else {
+            // Data exists, no error
+            setError('');
+            setSyncStatus('已同步');
           }
         } else {
           // Response structure unclear - try fallback
@@ -336,27 +478,54 @@ export default function MyDashboard() {
           console.log('🔄 Trying fallback endpoint...');
           try {
             const fallbackResponse = await employeeService.getMySchedule(selectedMonth);
-            setScheduleData(fallbackResponse.schedule || []);
+            if (fallbackResponse && fallbackResponse.schedule && fallbackResponse.schedule.length > 0) {
+              setScheduleData(fallbackResponse.schedule);
+              setError(''); // Clear error if fallback worked
+              setSyncStatus('已同步');
+            } else {
+              setError('無法載入班表資料，請檢查後端服務');
+              setSyncStatus('尚未同步');
+            }
           } catch (fallbackErr) {
             console.error('Fallback failed:', fallbackErr);
             setError('無法載入班表資料，請檢查後端服務');
+            setSyncStatus('尚未同步');
           }
         }
       } else {
         // Response is not an object - error
-        setError('無法載入班表資料，請檢查後端服務');
+        // Only show error if no data exists
+        if (scheduleData.length === 0) {
+          setError('無法載入班表資料，請檢查後端服務');
+          setSyncStatus('尚未同步');
+        }
         console.error('❌ Invalid response format:', typeof response, response);
       }
     } catch (err) {
       console.error('Error loading schedule:', err);
-      setError(err.response?.data?.error || '載入班表資料失敗');
       
-      // Try fallback endpoint
-      try {
-        const fallbackResponse = await employeeService.getMySchedule(selectedMonth);
-        setScheduleData(fallbackResponse.schedule || []);
-      } catch (fallbackErr) {
-        console.error('Fallback also failed:', fallbackErr);
+      // Only show error if we don't have existing schedule data
+      // If schedule data already exists, don't overwrite it with error
+      if (scheduleData.length === 0) {
+        setError(err.response?.data?.error || '載入班表資料失敗');
+        setSyncStatus('尚未同步');
+      } else {
+        // Keep existing data, just log the error
+        console.warn('Error loading schedule but keeping existing data:', err);
+      }
+      
+      // Try fallback endpoint only if no data exists
+      if (scheduleData.length === 0) {
+        try {
+          const fallbackResponse = await employeeService.getMySchedule(selectedMonth);
+          if (fallbackResponse && fallbackResponse.schedule && fallbackResponse.schedule.length > 0) {
+            setScheduleData(fallbackResponse.schedule);
+            setError(''); // Clear error if fallback worked
+            setSyncStatus('已同步');
+          }
+        } catch (fallbackErr) {
+          console.error('Fallback also failed:', fallbackErr);
+        }
       }
     } finally {
       setLoading(false);
@@ -365,7 +534,16 @@ export default function MyDashboard() {
 
   const checkSyncStatus = async () => {
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'}/admin/sync/status`, {
+      // Get schedule definition ID from user's tenant
+      const scheduleResponse = await employeeService.getSchedule(selectedMonth);
+      if (scheduleResponse && scheduleResponse.last_synced_at) {
+        setLastSyncedAt(scheduleResponse.last_synced_at);
+        return;
+      }
+      
+      // Fallback to sync status endpoint
+      // Hard-set API base URL to match backend CORS settings
+      const response = await fetch(`http://127.0.0.1:8000/api/v1/admin/sync/status`, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`,
@@ -483,37 +661,35 @@ export default function MyDashboard() {
                   }
                 }
                 
-                // Extract shift type - be more flexible
-                const cellStr = cellValue.toString().trim().toUpperCase();
-                let shiftType = 'D'; // Default to day shift
+                // CRITICAL: Keep the original cell value (e.g., "C 櫃台人力", "A 藥局人力")
+                const cellStr = cellValue.toString().trim();
+                const cellStrUpper = cellStr.toUpperCase();
                 
-                // Try to match shift codes
-                if (cellStr === 'OFF' || cellStr === '休' || cellStr.includes('休假') || cellStr === '' || cellStr === 'NULL') {
+                // Determine normalized shift type for time range calculation
+                let shiftType = 'D'; // Default to day shift
+                if (cellStrUpper === 'OFF' || cellStrUpper === '休' || cellStrUpper.includes('休假') || cellStr === '' || cellStr === 'NULL') {
                   shiftType = 'OFF';
-                } else if (cellStr === 'E' || cellStr.includes('小夜') || cellStr === 'EVENING') {
+                } else if (cellStrUpper === 'E' || cellStrUpper.includes('小夜') || cellStrUpper === 'EVENING') {
                   shiftType = 'E';
-                } else if (cellStr === 'N' || cellStr.includes('大夜') || cellStr === 'NIGHT') {
+                } else if (cellStrUpper === 'N' || cellStrUpper.includes('大夜') || cellStrUpper === 'NIGHT') {
                   shiftType = 'N';
-                } else if (cellStr === 'D' || cellStr.includes('白班') || cellStr === 'DAY') {
+                } else if (cellStrUpper === 'D' || cellStrUpper.includes('白班') || cellStrUpper === 'DAY') {
                   shiftType = 'D';
+                } else if (cellStrUpper.length === 1 && ['D', 'E', 'N'].includes(cellStrUpper)) {
+                  shiftType = cellStrUpper;
                 } else {
-                  // If it's a single letter, use it directly
-                  if (cellStr.length === 1 && ['D', 'E', 'N'].includes(cellStr)) {
-                    shiftType = cellStr;
-                  } else {
-                    // Default to D for unrecognized values
-                    shiftType = 'D';
-                    console.warn(`Unknown shift type: "${cellStr}", defaulting to D`);
-                  }
+                  // For complex values like "C 櫃台人力", use 'D' as normalized type but keep original value
+                  shiftType = 'D';
                 }
                 
                 if (dateStr) {
                   schedules.push({
                     date: dateStr,
-                    shiftType,
+                    shift: cellStr,  // Store actual value from Excel
+                    shiftType: shiftType,  // Normalized type for time range
                     timeRange: getTimePeriod(shiftType),
                   });
-                  console.log(`✅ Added schedule: ${dateStr} -> ${shiftType}`);
+                  console.log(`✅ Added schedule: ${dateStr} -> "${cellStr}" (type: ${shiftType})`);
                 } else {
                   console.warn(`⚠️ Skipped schedule entry: no date parsed for column "${columnHeader}", value: "${cellValue}"`);
                 }
@@ -528,9 +704,12 @@ export default function MyDashboard() {
     if (schedules.length === 0 && data && data.data && data.data.my_schedule && data.data.my_schedule.rows) {
       const rows = data.data.my_schedule.rows;
       const columns = data.data.my_schedule.columns || [];
+      // For employees, username IS the employee_id (e.g., E01, N01), so use it for matching
       const userIdentifier = (user?.username || user?.full_name || user?.userID || '').toLowerCase();
+      const usernameUpper = user?.username ? user.username.toUpperCase() : '';
       
       console.log('📊 Trying fallback parsing, user:', userIdentifier);
+      console.log('📊 Username (employee_id for employees):', usernameUpper);
       console.log('📊 Fallback - rows:', rows.length, 'columns:', columns.length);
       
       rows.forEach((row, rowIndex) => {
@@ -552,15 +731,22 @@ export default function MyDashboard() {
         
         if (rowData && rowData.length > 0) {
           // Check if this row belongs to the current user (first column should match)
-          const firstColValue = rowData[0]?.toString().toLowerCase().trim() || '';
+          const firstColValue = rowData[0]?.toString().trim() || '';
+          const firstColLower = firstColValue.toLowerCase();
+          const firstColUpper = firstColValue.toUpperCase();
+          
+          // For employees, match by username (employee_id) - exact match or partial match
           const matchesUser = !userIdentifier || 
-                             firstColValue === userIdentifier ||
-                             firstColValue.includes(userIdentifier) || 
-                             userIdentifier.includes(firstColValue) ||
+                             firstColLower === userIdentifier ||
+                             firstColUpper === usernameUpper || // Exact match with username (employee_id)
+                             firstColUpper.includes(usernameUpper) || // Partial match
+                             usernameUpper.includes(firstColUpper) ||
+                             firstColLower.includes(userIdentifier) || 
+                             userIdentifier.includes(firstColLower) ||
                              rowIndex === 0 || // Include first row
                              rows.length === 1; // If only one row, use it
           
-          console.log(`📊 Row ${rowIndex}: firstCol="${firstColValue}", userIdentifier="${userIdentifier}", matches=${matchesUser}`);
+          console.log(`📊 Row ${rowIndex}: firstCol="${firstColValue}", userIdentifier="${userIdentifier}", username="${usernameUpper}", matches=${matchesUser}`);
           
           if (matchesUser || rows.length === 1) {
             // Process date columns (skip first column which is identifier)
@@ -569,6 +755,7 @@ export default function MyDashboard() {
               const columnHeader = columns[colIndex] || columns[colIndex - 1] || '';
               
               if (cellValue && cellValue !== '' && cellValue !== null && cellValue !== undefined) {
+                // CRITICAL: Keep the original cell value (e.g., "C 櫃台人力", "A 藥局人力")
                 const cellStr = String(cellValue).trim();
                 if (cellStr === '' || cellStr === 'null' || cellStr === 'NULL') continue;
                 
@@ -609,10 +796,11 @@ export default function MyDashboard() {
                 if (dateStr) {
                   schedules.push({
                     date: dateStr,
-                    shiftType,
+                    shift: cellStr,  // Store actual value from Excel
+                    shiftType: shiftType,  // Normalized type for time range
                     timeRange: getTimePeriod(shiftType),
                   });
-                  console.log(`✅ Fallback: Added schedule ${dateStr} -> ${shiftType}`);
+                  console.log(`✅ Fallback: Added schedule ${dateStr} -> "${cellStr}" (type: ${shiftType})`);
                 }
               }
             }
@@ -639,7 +827,9 @@ export default function MyDashboard() {
   }
 
   const monthOptions = generateMonthOptions();
-  const employeeId = user?.userID ? `EMP-${user.userID}` : 'EMP-000';
+  // For employees, username is the employee_id (e.g., E01, N01)
+  // Display username instead of EMP-userID
+  const employeeDisplay = user?.username || (user?.userID ? `EMP-${user.userID}` : 'EMP-000');
   const employeeName = user?.full_name || user?.username || '員工';
 
   return (
@@ -648,7 +838,7 @@ export default function MyDashboard() {
       <div className="flex flex-col md:flex-row justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">我的班表</h1>
-          <p className="mt-1 text-sm text-gray-600">歡迎，{employeeName} ({employeeId})</p>
+          <p className="mt-1 text-sm text-gray-600">歡迎，{employeeName} ({employeeDisplay})</p>
         </div>
         <div className="mt-4 md:mt-0">
           <label htmlFor="month-select" className="block text-sm font-medium text-gray-700 mb-1">
@@ -667,11 +857,16 @@ export default function MyDashboard() {
             ))}
           </select>
           {/* Show sync status and last sync time */}
-          <div className="mt-2 text-xs text-gray-500">
-            {isSyncing ? (
-              <span className="text-blue-600">資料同步中...</span>
+          <div className="mt-2 text-xs">
+            {syncStatus === '已同步' ? (
+              <span className="text-green-600 font-medium">✅ 已同步</span>
+            ) : syncStatus === '同步中...' || isSyncing ? (
+              <span className="text-blue-600 font-medium">🔄 同步中...</span>
             ) : (
-              <span>{formatSyncTime(lastSyncedAt)}</span>
+              <span className="text-gray-500">⚠️ 尚未同步</span>
+            )}
+            {lastSyncedAt && syncStatus === '已同步' && (
+              <span className="text-gray-500 ml-2">({formatSyncTime(lastSyncedAt)})</span>
             )}
           </div>
         </div>
@@ -679,7 +874,7 @@ export default function MyDashboard() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || '發生錯誤')}
         </div>
       )}
 
@@ -720,7 +915,7 @@ export default function MyDashboard() {
                       {getDayOfWeek(schedule.date)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {getShiftBadge(schedule.shiftType)}
+                      {getShiftBadge(schedule.shift, schedule.shiftType)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {getTimePeriod(schedule.shiftType, schedule.timeRange)}

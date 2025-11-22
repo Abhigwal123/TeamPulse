@@ -123,17 +123,27 @@ class ScheduleJobLog(db.Model):
             result_summary: Summary of the job results
             metadata: Additional metadata about the completion
         """
-        # Support both 'success' and 'completed' status for compatibility
-        self.status = 'completed'  # Changed from 'success' to match frontend expectations
-        self.endTime = datetime.utcnow()
-        self.resultSummary = result_summary
-        self.execution_time_seconds = self._calculate_execution_time()
-        
-        if metadata:
-            self.job_metadata = {**(self.job_metadata or {}), **metadata}
-        
-        self.updated_at = datetime.utcnow()
-        db.session.commit()
+        try:
+            # Support both 'success' and 'completed' status for compatibility
+            self.status = 'completed'  # Changed from 'success' to match frontend expectations
+            self.endTime = datetime.utcnow()
+            self.resultSummary = result_summary
+            self.execution_time_seconds = self._calculate_execution_time()
+            
+            if metadata:
+                self.job_metadata = {**(self.job_metadata or {}), **metadata}
+            
+            self.updated_at = datetime.utcnow()
+            
+            # Ensure we're in a valid session and commit
+            db.session.add(self)  # Ensure object is in session
+            db.session.commit()
+            
+            logger.info(f"Job log {self.logID} marked as completed with endTime: {self.endTime}")
+        except Exception as e:
+            logger.error(f"Error completing job log {self.logID}: {e}")
+            db.session.rollback()
+            raise
     
     def fail_job(self, error_message: str = None, metadata: Dict[str, Any] = None) -> None:
         """

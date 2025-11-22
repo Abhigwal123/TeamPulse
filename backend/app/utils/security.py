@@ -126,21 +126,6 @@ def sanitize_input(input_string: str) -> str:
     
     return sanitized.strip()
 
-def validate_email(email: str) -> bool:
-    """
-    Validate email format
-    
-    Args:
-        email: Email address to validate
-        
-    Returns:
-        True if email is valid, False otherwise
-    """
-    import re
-    
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return re.match(pattern, email) is not None
-
 def validate_url(url: str) -> bool:
     """
     Validate URL format
@@ -155,6 +140,28 @@ def validate_url(url: str) -> bool:
     
     pattern = r'^https?://(?:[-\w.])+(?:[:\d]+)?(?:/(?:[\w/_.])*(?:\?(?:[\w&=%.])*)?(?:#(?:[\w.])*)?)?$'
     return re.match(pattern, url) is not None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

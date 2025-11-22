@@ -174,6 +174,14 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const getToken = useCallback(() => {
+    return (
+      localStorage.getItem('token') ||
+      localStorage.getItem('access_token') ||
+      localStorage.getItem('jwt')
+    );
+  }, []);
+
   const value = {
     isAuthenticated,
     user,
@@ -181,6 +189,7 @@ export const AuthProvider = ({ children }) => {
     login,
     logout,
     loading,
+    getToken,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

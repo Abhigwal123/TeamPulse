@@ -6,6 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import Modal from '../../components/Modal';
 import Button from '../../components/Button';
+import { normalizeApiError, ensureString } from '../../utils/apiError';
 
 const getStatusBadge = (status) => {
   const statusMap = {
@@ -249,10 +250,71 @@ export default function Scheduling() {
           await handleViewScheduleAnalysis(selectedScheduleForAnalysis);
         }
         
-        // Show success message
+        // Get the job log ID from the response
+        const jobLogId = response.data?.logID || response.data?.jobLogID || response.data?.log_id;
+        
+        if (jobLogId) {
+          // Poll the job status for a few seconds to check if it fails quickly
+          // This catches errors that happen during execution (e.g., "Error loading input data")
+          let pollCount = 0;
+          const maxPolls = 10; // Poll for up to 5 seconds (10 * 500ms)
+          const pollInterval = 500; // Check every 500ms
+          
+          const checkJobStatus = async () => {
+            try {
+              const jobLogResponse = await scheduleService.getJobLogById(jobLogId);
+              const jobLog = jobLogResponse.data || jobLogResponse;
+              const status = jobLog.status;
+              const errorMessage = jobLog.error_message || jobLog.errorMessage;
+              
+              console.log('[DEBUG] Job status check:', { status, errorMessage, pollCount });
+              
+              if (status === 'failed') {
+                // Job failed - show the actual error message
+                let errorMsg = errorMessage || '排班作業執行失敗';
+                // Extract the actual error if it's in a specific format
+                if (errorMessage) {
+                  // Clean up error message - remove system prefixes and timestamps if present
+                  let cleanError = errorMessage;
+                  // Remove common prefixes like "[System] 'system' " or similar
+                  cleanError = cleanError.replace(/^\[System\]\s*['"]?system['"]?\s*/i, '');
+                  // Remove trailing timestamps like "5 小時前" or similar patterns
+                  cleanError = cleanError.replace(/\s*\d+\s*(小時前|分鐘前|秒前|hours? ago|minutes? ago|seconds? ago).*$/i, '');
+                  
+                  if (cleanError.includes('Error loading input data')) {
+                    errorMsg = `載入輸入資料時發生錯誤: ${cleanError}`;
+                  } else {
+                    errorMsg = cleanError;
+                  }
+                }
+                setError(errorMsg);
+                return true; // Stop polling
+              } else if (status === 'completed' || status === 'success') {
+                // Job completed successfully - no need to show message, data will refresh
+                return true; // Stop polling
+              } else if (status === 'running' || status === 'pending') {
+                // Job is still running - continue polling
+                if (pollCount < maxPolls) {
+                  pollCount++;
+                  setTimeout(checkJobStatus, pollInterval);
+                }
+                return false; // Continue polling
+              }
+            } catch (pollErr) {
+              console.error('[DEBUG] Error polling job status:', pollErr);
+              // If polling fails, just continue (job might still be running)
+              return true; // Stop polling on error
+            }
+          };
+          
+          // Start polling after a short delay
+          setTimeout(checkJobStatus, pollInterval);
+        }
+        
+        // Show initial message that job was started
         alert('排班作業已開始執行');
       } else {
-        setError(response.error || '執行排班失敗');
+        setError(ensureString(response.error) || '執行排班失敗');
       }
     } catch (err) {
       console.error('[DEBUG] Schedule run error:', err);
@@ -270,10 +332,9 @@ export default function Scheduling() {
         errorMsg = '登入已過期，請重新登入';
       } else if (!err.response) {
         errorMsg = '無法連接到伺服器，請確認後端服務是否正在運行';
-      } else if (err.response?.data?.error) {
-        errorMsg = err.response.data.error;
-      } else if (err.response?.data?.details) {
-        errorMsg = err.response.data.details;
+      } else {
+        // Use normalizeApiError to ensure we always get a string
+        errorMsg = normalizeApiError(err);
       }
       
       setError(errorMsg);
@@ -360,7 +421,7 @@ export default function Scheduling() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {ensureString(error)}
         </div>
       )}
 

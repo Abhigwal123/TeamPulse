@@ -2,10 +2,13 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import Login from '../pages/Auth/Login';
 import Logout from '../pages/Auth/Logout';
+import Register from '../pages/Auth/Register';
+import Profile from '../pages/Profile/Profile';
 import SysAdminRoutes from './SysAdminRoutes';
 import ClientAdminRoutes from './ClientAdminRoutes';
 import ScheduleManagerRoutes from './ScheduleManagerRoutes';
 import EmployeeRoutes from './EmployeeRoutes';
+import ProtectedRoute from './ProtectedRoute';
 import { ROUTES } from '../utils/constants';
 
 export default function AppRoutes() {
@@ -59,10 +62,26 @@ export default function AppRoutes() {
       
       {/* Logout route */}
       <Route path="/logout" element={<Logout />} />
+      
+      {/* Register route - accessible when authenticated (role-based) or public */}
+      <Route
+        path="/register"
+        element={<Register />}
+      />
 
       {/* Protected routes - only show when authenticated */}
       {isAuthenticated && user ? (
         <>
+          {/* Profile route - accessible to all authenticated users */}
+          <Route
+            path="/profile"
+            element={
+              <ProtectedRoute>
+                <Profile />
+              </ProtectedRoute>
+            }
+          />
+          
           <Route path="/sysadmin/*" element={<SysAdminRoutes />} />
           <Route path="/client-admin/*" element={<ClientAdminRoutes />} />
           <Route path="/schedule-manager/*" element={<ScheduleManagerRoutes />} />

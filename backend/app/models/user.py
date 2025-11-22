@@ -3,7 +3,15 @@ from app import db
 from datetime import datetime
 from typing import List, Optional, TYPE_CHECKING
 from sqlalchemy.orm import foreign
+from sqlalchemy import func
 import logging
+
+from app.utils.role_utils import (
+    format_role_for_response,
+    is_client_admin_role,
+    is_schedule_manager_role,
+    normalize_role,
+)
 
 if TYPE_CHECKING:
     from app.models.schedule_permission import SchedulePermission
@@ -34,6 +42,9 @@ class User(db.Model):
     status = db.Column(db.String(20), nullable=False, default='active', index=True)  # active, inactive, suspended
     email = db.Column(db.String(255), unique=True, nullable=True, index=True)
     full_name = db.Column(db.String(255), nullable=True)
+    # Employee ID from Google Sheets (e.g., "E01", "E02") - must match EmployeeMapping.sheets_identifier
+    # Note: This column is added via migration - may not exist in older databases
+    employee_id = db.Column(db.String(255), unique=True, nullable=True, index=True, info={'migrated': True})
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_login = db.Column(db.DateTime, nullable=True)
@@ -56,7 +67,7 @@ class User(db.Model):
     )
     
     def __init__(self, userID: str = None, tenantID: str = None, username: str = None, 
-                 password: str = None, role: str = 'viewer', **kwargs):
+                 password: str = None, role: str = 'viewer', employee_id: str = None, **kwargs):
         """
         Initialize a new User instance
         
@@ -66,6 +77,7 @@ class User(db.Model):
             username: Username for login
             password: Plain text password (will be hashed)
             role: User role (admin, scheduler, viewer)
+            employee_id: Employee ID from Google Sheets (e.g., "E01", "E02")
             **kwargs: Additional fields
         """
         if userID:
@@ -75,13 +87,14 @@ class User(db.Model):
             self.userID = generate_user_id()
         
         self.tenantID = tenantID
-        self.username = username
+        self.username = username.strip() if isinstance(username, str) else username
+        self.employee_id = employee_id.strip().upper() if isinstance(employee_id, str) else employee_id
         
         if password:
             from app.utils.security import hash_password
             self.hashedPassword = hash_password(password)
         
-        self.role = role
+        self.role = format_role_for_response(role) if role else role
         super().__init__(**kwargs)
     
     def set_password(self, password: str) -> None:
@@ -121,10 +134,11 @@ class User(db.Model):
             'userID': self.userID,
             'tenantID': self.tenantID,
             'username': self.username,
-            'role': self.role,
+            'role': format_role_for_response(self.role),
             'status': self.status,
             'email': self.email,
             'full_name': self.full_name,
+            'employee_id': self.employee_id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'last_login': self.last_login.isoformat() if self.last_login else None
@@ -138,7 +152,8 @@ class User(db.Model):
     def update_last_login(self) -> None:
         """Update the last login timestamp"""
         self.last_login = datetime.utcnow()
-        db.session.commit()
+        # Don't commit here - let the calling code handle the commit
+        # This prevents session conflicts in routes
     
     def is_active(self) -> bool:
         """
@@ -149,23 +164,33 @@ class User(db.Model):
         """
         return self.status == 'active'
     
+    @property
+    def normalized_role(self) -> str:
+        """Return normalized role identifier."""
+        return normalize_role(self.role)
+
     def is_admin(self) -> bool:
         """
         Check if user has admin role
         
         Returns:
-            True if user role is 'admin' or 'SysAdmin', False otherwise
+            True if user is a ClientAdmin, False otherwise
         """
-        return self.role in ['admin', 'SysAdmin']
+        return self.is_client_admin
     
+    @property
+    def is_client_admin(self) -> bool:
+        """Return True if the user is a ClientAdmin-level account."""
+        return is_client_admin_role(self.role)
+
     def is_scheduler(self) -> bool:
         """
         Check if user has scheduler role
         
         Returns:
-            True if user role is 'scheduler', False otherwise
+            True if user role maps to ScheduleManager, False otherwise
         """
-        return self.role == 'scheduler'
+        return is_schedule_manager_role(self.role)
     
     def can_run_schedules(self) -> bool:
         """
@@ -174,7 +199,7 @@ class User(db.Model):
         Returns:
             True if user is admin or scheduler, False otherwise
         """
-        return self.role in ['admin', 'scheduler']
+        return self.is_client_admin or is_schedule_manager_role(self.role)
     
     def get_permissions(self) -> List['SchedulePermission']:
         """
@@ -200,6 +225,16 @@ class User(db.Model):
         return db.session.query(ScheduleJobLog).filter_by(runByUserID=self.userID).order_by(ScheduleJobLog.startTime.desc()).limit(limit).all()
     
     @classmethod
+    @staticmethod
+    def _normalize_lookup_value(value: Optional[str]) -> Optional[str]:
+        """
+        Normalize lookup strings (username, employee_id) for case-insensitive comparisons.
+        """
+        if value is None:
+            return None
+        return str(value).strip().lower()
+    
+    @classmethod
     def find_by_username(cls, username: str) -> Optional['User']:
         """
         Find user by username
@@ -210,7 +245,10 @@ class User(db.Model):
         Returns:
             User instance or None if not found
         """
-        return cls.query.filter_by(username=username).first()
+        normalized = cls._normalize_lookup_value(username)
+        if not normalized:
+            return None
+        return cls.query.filter(func.lower(cls.username) == normalized).first()
     
     @classmethod
     def find_by_email(cls, email: str) -> Optional['User']:
@@ -263,6 +301,22 @@ class User(db.Model):
             List of User instances with the specified role
         """
         return cls.query.filter_by(role=role).all()
+    
+    @classmethod
+    def find_by_employee_id(cls, employee_id: str) -> Optional['User']:
+        """
+        Find user by employee ID
+        
+        Args:
+            employee_id: Employee ID from Google Sheets (e.g., "E01", "E02")
+            
+        Returns:
+            User instance or None if not found
+        """
+        normalized = cls._normalize_lookup_value(employee_id)
+        if not normalized:
+            return None
+        return cls.query.filter(func.lower(cls.employee_id) == normalized).first()
     
     def __repr__(self) -> str:
         """String representation of the user"""

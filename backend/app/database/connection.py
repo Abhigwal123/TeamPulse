@@ -1,39 +1,33 @@
 """
 Database connection and session management
+NOTE: This file is kept for Alembic compatibility but Flask-SQLAlchemy should be used instead.
 """
 
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from ..core.config import settings
+import os
 
-# Create database engine
-# Handle SQLite vs MySQL connection args
-connect_args = {}
-if "sqlite" in settings.DATABASE_URL.lower():
-    connect_args = {"check_same_thread": False}
-elif "mysql" in settings.DATABASE_URL.lower():
-    # MySQL connection - try to set up but don't fail if driver missing
-    try:
-        import MySQLdb
-    except ImportError:
-        # If MySQLdb is not available and we're using MySQL, fallback to SQLite for development
-        import os
-        fallback_url = os.getenv("FALLBACK_DATABASE_URL", "sqlite:///./scheduling_system.db")
-        if fallback_url:
-            settings.DATABASE_URL = fallback_url
-            connect_args = {"check_same_thread": False}
+# Get database URL from environment
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "mysql+pymysql://scheduling_user:scheduling_password@localhost:3306/scheduling_system"
+)
 
+# Create database engine with MySQL connection pooling
 engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    echo=settings.DEBUG
+    DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=3600,
+    pool_pre_ping=True,
+    echo=False
 )
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Create base class for models
+# Create base class for models (used by Alembic)
 Base = declarative_base()
 
 

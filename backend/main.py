@@ -3,6 +3,7 @@ Flask Application Entry Point
 Run with: python flask_app.py --port 8000
 """
 import sys
+import os
 import argparse
 import logging
 from app import create_app
@@ -43,23 +44,29 @@ except Exception as e:
     sys.exit(1)
 
 
+DEFAULT_HOST = os.getenv("FLASK_HOST", "localhost")  # Use 0.0.0.0 in Docker
+DEFAULT_PORT = 8000
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Flask Backend Server')
-    parser.add_argument('--port', type=int, default=8000, help='Port to run the server on (default: 8000)')
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--host', type=str, default=DEFAULT_HOST, help='Host to bind to (default: localhost, use 0.0.0.0 for Docker)')
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT, help='Port to run the server on (default: 8000)')
     args = parser.parse_args()
     
     try:
         print("\n" + "="*80)
         print("  Flask Backend Server Starting")
         print("="*80)
-        print(f"\n✓ Server running on: http://{args.host}:{args.port}")
-        print(f"✓ Access locally at: http://localhost:{args.port}")
+        bind_address = args.host if args.host != "0.0.0.0" else "0.0.0.0"
+        print(f"\n✓ Running on http://{bind_address}:{args.port}")
+        print(f"✓ API endpoints available at: http://{bind_address}:{args.port}/api/v1/")
         print("\nPress Ctrl+C to stop\n")
         print("="*80 + "\n")
         
-        app.run(debug=args.debug, host=args.host, port=args.port, use_reloader=False)
+        # In Docker, bind to 0.0.0.0 to accept connections from outside container
+        # In local development, bind to localhost for security
+        app.run(debug=False, host=args.host, port=args.port, use_reloader=False)
     except KeyboardInterrupt:
         print("\n\nServer stopped by user")
     except Exception as e:

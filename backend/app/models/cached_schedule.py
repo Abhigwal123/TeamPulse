@@ -23,12 +23,14 @@ class CachedSchedule(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     
     # Foreign Keys
+    tenant_id = db.Column(db.String(36), db.ForeignKey('tenants.tenantID'), nullable=False, index=True)
     schedule_def_id = db.Column(db.String(36), db.ForeignKey('schedule_definitions.scheduleDefID'), nullable=False, index=True)
     user_id = db.Column(db.String(36), db.ForeignKey('users.userID'), nullable=False, index=True)
     
     # Schedule Data
     date = db.Column(db.Date, nullable=False, index=True)  # Date of the schedule entry
-    shift_type = db.Column(db.String(10), nullable=True)  # D, E, N, OFF
+    shift_type = db.Column(db.String(10), nullable=True)  # D, E, N, OFF (normalized)
+    shift_value = db.Column(db.String(255), nullable=True)  # Raw shift value from sheet (e.g., "C 櫃台人力", "A 藥局人力")
     time_range = db.Column(db.String(50), nullable=True)  # e.g., "08:00 - 16:00"
     
     # Metadata
@@ -42,6 +44,7 @@ class CachedSchedule(db.Model):
     )
     
     # Relationships
+    tenant = db.relationship('Tenant', backref='cached_schedules')
     schedule_definition = db.relationship('ScheduleDefinition', backref='cached_schedules')
     user = db.relationship('User', backref='cached_schedules')
     
@@ -134,10 +137,12 @@ class CachedSchedule(db.Model):
         """Convert to dictionary"""
         return {
             'id': self.id,
+            'tenant_id': self.tenant_id,
             'schedule_def_id': self.schedule_def_id,
             'user_id': self.user_id,
             'date': self.date.isoformat() if self.date else None,
             'shift_type': self.shift_type,
+            'shift_value': self.shift_value,  # Raw shift value from sheet
             'time_range': self.time_range,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,

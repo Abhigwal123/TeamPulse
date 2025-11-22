@@ -59,7 +59,7 @@ def seed_initial_data(app):
         
         # Create default users: admin, editor, viewer
         default_users = [
-            {"username": "admin", "password": "admin123", "role": "SysAdmin", "email": "admin@test.com", "full_name": "System Admin"},
+            {"username": "admin", "password": "admin123", "role": "ClientAdmin", "email": "admin@test.com", "full_name": "Client Admin"},
             {"username": "editor", "password": "editor123", "role": "ScheduleManager", "email": "editor@test.com", "full_name": "Editor User"},
             {"username": "viewer", "password": "viewer123", "role": "Department_Employee", "email": "viewer@test.com", "full_name": "Viewer User"},
             {"username": "schedulemanager", "password": "manager123", "role": "ScheduleManager", "email": "manager@test.com", "full_name": "Schedule Manager"},
@@ -119,7 +119,7 @@ def seed_schedule_definitions(app):
         from flask import current_app
         default_input_url = current_app.config.get(
             "GOOGLE_INPUT_URL",
-            "https://docs.google.com/spreadsheets/d/1S1TpLejxD-k93HoKRpjm81XubHyoCgaAPXfYqx5ESW0/edit?gid=219808289#gid=219808289"
+            "https://docs.google.com/spreadsheets/d/1hEr8XD3ThVQQAFWi-Q0owRYxYnBRkwyqiOdbmp6zafg/edit?gid=0#gid=0"
         )
         default_output_url = current_app.config.get(
             "GOOGLE_OUTPUT_URL",

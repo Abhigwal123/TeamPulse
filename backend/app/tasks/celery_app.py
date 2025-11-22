@@ -6,11 +6,13 @@ exposes a MockCelery that runs tasks synchronously via .delay().
 """
 
 import os
-from ..core.config import settings
+import platform
 from celery import Celery
 
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", getattr(settings, "CELERY_BROKER_URL", "redis://localhost:6379/0"))
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", getattr(settings, "CELERY_RESULT_BACKEND", "redis://localhost:6379/1"))
+# Use new-style configuration keys (extract from old-style env vars for backward compatibility)
+# Use Redis database 0 for broker and database 1 for result backend
+broker_url = os.getenv("CELERY_BROKER_URL") or os.getenv("broker_url") or "redis://localhost:6379/0"
+result_backend = os.getenv("CELERY_RESULT_BACKEND") or os.getenv("result_backend") or "redis://localhost:6379/1"
 
 class _MockTask:
     def __init__(self, fn):
@@ -30,14 +32,19 @@ class MockCelery:
 
 
 celery = Celery(
-    "scheduling_saas",
-    broker=CELERY_BROKER_URL,
-    backend=CELERY_RESULT_BACKEND,
+    "projectup",
+    broker=broker_url,
+    backend=result_backend,
     include=["app.tasks.tasks", "app.tasks.google_sync"],
 )
 
 def init_celery(flask_app):
+    # Use ONLY new-style Celery 5+ configuration keys
     celery.conf.update(
+        broker_url=broker_url,
+        result_backend=result_backend,
+        # 🔧 CRITICAL: Explicitly set broker_transport to "redis" to prevent AMQP defaults
+        broker_transport="redis",
         task_serializer="json",
         accept_content=["json"],
         result_serializer="json",
@@ -49,11 +56,36 @@ def init_celery(flask_app):
         result_expires=3600,
     )
     
+    # 🔧 FORCE broker transport to ensure it's not overridden
+    celery.conf.broker_transport = "redis"
+    
+    # 🪟 Windows Fix: Use solo pool to prevent PermissionError (WinError 5)
+    # Windows cannot use the prefork pool due to multiprocessing limitations
+    if platform.system() == "Windows":
+        celery.conf.worker_pool = "solo"
+    
     # Configure beat schedule for periodic tasks
+    from celery.schedules import crontab
+    from datetime import timedelta
     celery.conf.beat_schedule = {
+        'daily-google-sheet-sync': {
+            'task': 'app.tasks.google_sync.sync_google_sheets_daily',
+            'schedule': crontab(minute=0, hour=0),  # Run daily at midnight (00:00)
+        },
+        # Also run every 4 hours to catch any missed syncs
         'periodic-google-sheet-sync': {
             'task': 'app.tasks.google_sync.sync_google_sheets_daily',
-            'schedule': 600.0,  # every 10 minutes (task will skip if data is fresh)
+            'schedule': crontab(minute=0, hour='*/4'),  # Every 4 hours (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)
+        },
+        # Sync Google Sheets metadata every 5 minutes for real-time data freshness
+        'sync-all-sheets-metadata': {
+            'task': 'app.tasks.google_sync.sync_all_sheets_metadata',
+            'schedule': timedelta(minutes=5),  # Every 5 minutes
+        },
+        # Auto-ensure schedule sync every 10 minutes - checks all employees and triggers sync if needed
+        'auto-ensure-schedule-sync': {
+            'task': 'app.tasks.google_sync.ensure_schedule_auto_sync',
+            'schedule': timedelta(minutes=10),  # Every 10 minutes
         },
     }
 

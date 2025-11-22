@@ -1,4 +1,5 @@
 import api from './api';
+import { normalizeApiError } from '../utils/apiError';
 
 export const authService = {
   // Test backend connectivity before login
@@ -26,10 +27,18 @@ export const authService = {
       
       console.log('Login response:', response.data);
       
-      if (response.data && response.data.success && response.data.access_token) {
-        // Store token as 'token' for compatibility with requirements
-        localStorage.setItem('token', response.data.access_token);
-        localStorage.setItem('access_token', response.data.access_token); // Keep for backward compatibility
+      // Support multiple token formats: access_token, token, or nested data.access_token
+      const token = response.data.access_token || 
+                    response.data.token || 
+                    response.data.data?.access_token ||
+                    response.data.data?.token;
+      
+      if (response.data && response.data.success && token) {
+        // Store token in multiple formats for maximum compatibility
+        localStorage.setItem('jwt', token);  // Primary key as per requirements
+        localStorage.setItem('token', token);
+        localStorage.setItem('access_token', token); // Keep for backward compatibility
+        console.log('[AUTH] JWT token stored in localStorage (keys: jwt, token, access_token)');
         
         // Extract user data - handle both nested and flat structures
         const userData = response.data.user || {};
@@ -76,24 +85,25 @@ export const authService = {
         baseURL: error.config?.baseURL,
       });
       
-      // Handle different error types
-      if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
-        return {
-          success: false,
-          error: '無法連接到伺服器，請確認後端服務是否正在運行',
-        };
+      // Log full error response for debugging
+      if (error.response?.data) {
+        console.error('Full error response:', JSON.stringify(error.response.data, null, 2));
+        if (error.response.data.trace) {
+          console.error('Backend traceback:', error.response.data.trace);
+        }
       }
       
+      // Use normalizeApiError to ensure we always return a string
+      let errorMessage = normalizeApiError(error);
+      
+      // Override with specific messages for certain status codes
       if (error.response?.status === 401) {
-        return {
-          success: false,
-          error: '帳號或密碼錯誤，請重試',
-        };
+        errorMessage = '帳號或密碼錯誤，請重試';
       }
       
       return {
         success: false,
-        error: error.response?.data?.error || error.message || '登入失敗，請檢查您的帳號和密碼',
+        error: errorMessage,
       };
     }
   },
@@ -104,6 +114,7 @@ export const authService = {
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
+      localStorage.removeItem('jwt');
       localStorage.removeItem('token');
       localStorage.removeItem('access_token');
       localStorage.removeItem('auth');
@@ -154,6 +165,34 @@ export const authService = {
       // Re-throw error so AuthContext can check for 401 status
       // This allows AuthContext to distinguish between 401 (logout) and network errors (keep auth)
       throw error;
+    }
+  },
+
+  register: async (userData) => {
+    try {
+      console.log('[authService] Registering user:', userData);
+      const response = await api.post('/auth/register', userData);
+      
+      if (response.data && response.data.success) {
+        return {
+          success: true,
+          message: response.data.message || 'User registered successfully',
+          user: response.data.user || response.data.data,
+        };
+      }
+      
+      return {
+        success: false,
+        error: response.data.error || 'Registration failed',
+      };
+    } catch (error) {
+      console.error('Registration error:', error);
+      // Use normalizeApiError to ensure we always return a string
+      const errorMessage = normalizeApiError(error);
+      return {
+        success: false,
+        error: errorMessage,
+      };
     }
   },
 };

@@ -1,5 +1,10 @@
 from flask import Blueprint, jsonify, request
+from flask_jwt_extended import get_jwt_identity
+
+from app.models import User, Tenant, ScheduleDefinition, ScheduleJobLog
 from app.utils.auth import role_required
+from app.utils.role_utils import is_client_admin_role
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -9,21 +14,10 @@ logger = logging.getLogger(__name__)
 sysadmin_bp = Blueprint("sysadmin", __name__)
 
 
-@sysadmin_bp.route("/dashboard", methods=["GET", "OPTIONS"])
-@role_required("SysAdmin")
+@sysadmin_bp.route("/dashboard", methods=["GET"])
+@role_required("ClientAdmin", "SysAdmin")
 def dashboard():
-    """SysAdmin dashboard with Organization and Schedule Maintenance views"""
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
-    
-    from flask_jwt_extended import get_jwt_identity
-    from app.models import User, Tenant, ScheduleDefinition
-    
+    """ClientAdmin system dashboard with Organization and Schedule Maintenance views"""
     try:
         current_user_id = get_jwt_identity()
         user = User.query.get(current_user_id)
@@ -33,24 +27,21 @@ def dashboard():
             response.headers.add("Access-Control-Allow-Origin", "*")
             return response, 404
         
-        # Get system-wide statistics
-        # ⚠️ AUDIT NOTE: Currently using DATABASE queries, NOT Google Sheets
-        # TODO: Replace with Google Sheets fetch if tenant/schedule data is stored in sheets
-        
-        # ✅ VERIFICATION: 客戶機構總數 - DATABASE QUERY ONLY
-        logger.info(f"[TRACE] 客戶機構總數 source confirmed: sysadmin_routes.py:37 → Tenant.query.count() → DATABASE")
-        logger.info(f"[TRACE] Data flow: Frontend → /api/v1/sysadmin/dashboard → Tenant.query.count() → SQLite (tenants table)")
-        total_tenants = Tenant.query.count()
-        active_tenants = Tenant.query.filter_by(is_active=True).count()
-        
-        # ✅ VERIFICATION: 已設定班表總數 - DATABASE QUERY ONLY
-        logger.info(f"[TRACE] 已設定班表總數 source confirmed: sysadmin_routes.py:39 → ScheduleDefinition.query.count() → DATABASE")
-        logger.info(f"[TRACE] Data flow: Frontend → /api/v1/sysadmin/dashboard → ScheduleDefinition.query.count() → SQLite (schedule_definitions table)")
-        total_schedules = ScheduleDefinition.query.count()
-        active_schedules = ScheduleDefinition.query.filter_by(is_active=True).count()
-        
-        logger.info(f"[TRACE] SysAdmin dashboard stats - tenants: {total_tenants}, schedules: {total_schedules}")
-        logger.info(f"[TRACE] ✅ CONFIRMED: No Google Sheets API calls in dashboard endpoint")
+        is_client_admin = is_client_admin_role(user.role)
+        if is_client_admin:
+            total_tenants = Tenant.query.count()
+            active_tenants = Tenant.query.filter_by(is_active=True).count()
+            total_schedules = ScheduleDefinition.query.count()
+            active_schedules = ScheduleDefinition.query.filter_by(is_active=True).count()
+            logger.info(f"[TRACE] ClientAdmin system dashboard stats - tenants: {total_tenants}, schedules: {total_schedules}")
+        else:
+            logger.info("[TRACE] SysAdmin dashboard scoped to tenant %s", user.tenantID)
+            tenant = user.tenant
+            total_tenants = 1 if tenant else 0
+            active_tenants = 1 if tenant and tenant.is_active else 0
+            tenant_schedules = ScheduleDefinition.query.filter_by(tenantID=user.tenantID)
+            total_schedules = tenant_schedules.count()
+            active_schedules = tenant_schedules.filter_by(is_active=True).count()
         
         stats = {
             "total_tenants": total_tenants,
@@ -65,7 +56,7 @@ def dashboard():
         
         response = jsonify({
             "success": True,
-            "dashboard": "sysadmin",
+            "dashboard": "clientadmin",
             "user": user.to_dict(),
             "stats": stats,
             "views": ["B1: Organization", "B2: Schedule List", "B3: Schedule Maintenance"]
@@ -82,37 +73,38 @@ def dashboard():
 
 
 @sysadmin_bp.route("/tenants", methods=["GET"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def tenants():
     return jsonify({"tenants": []})
 
 
 @sysadmin_bp.route("/tenant", methods=["POST"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def create_tenant():
+    current_user = User.query.get(get_jwt_identity())
+    if not current_user or not is_client_admin_role(current_user.role):
+        return jsonify({"error": "ClientAdmin access required"}), 403
     return jsonify({"created": True}), 201
 
 
 @sysadmin_bp.route("/tenant/<int:tenant_id>", methods=["PUT"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def update_tenant(tenant_id: int):
+    current_user = User.query.get(get_jwt_identity())
+    if not current_user or not is_client_admin_role(current_user.role):
+        return jsonify({"error": "ClientAdmin access required"}), 403
     return jsonify({"updated": True, "id": tenant_id})
 
 
-@sysadmin_bp.route("/logs", methods=["GET", "OPTIONS"])
-@role_required("SysAdmin")
+@sysadmin_bp.route("/logs", methods=["GET"])
+@role_required("ClientAdmin", "SysAdmin")
 def logs():
     """Get system logs"""
     # Handle CORS preflight
-    if request.method == "OPTIONS":
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
-    
     try:
-        from app.models import ScheduleJobLog
+        current_user = User.query.get(get_jwt_identity())
+        if not current_user:
+            return jsonify({"success": False, "logs": [], "error": "User not found"}), 404
         
         # Get limit from query params (default to 10)
         limit = request.args.get('limit', 10, type=int)
@@ -124,7 +116,10 @@ def logs():
         logger.info(f"[TRACE] 系統日誌 source confirmed: sysadmin_routes.py:116 → ScheduleJobLog.query → DATABASE")
         logger.info(f"[TRACE] Data flow: Frontend → /api/v1/sysadmin/logs → ScheduleJobLog.query → SQLite (schedule_job_logs table)")
         logger.info(f"[TRACE] ✅ CONFIRMED: No Google Sheets API calls in logs endpoint")
-        logs = ScheduleJobLog.query.order_by(ScheduleJobLog.created_at.desc()).limit(limit).all()
+        log_query = ScheduleJobLog.query.order_by(ScheduleJobLog.created_at.desc())
+        if not is_client_admin_role(current_user.role):
+            log_query = log_query.filter_by(tenantID=current_user.tenantID)
+        logs = log_query.limit(limit).all()
         
         log_list = []
         for log in logs:
@@ -166,9 +161,9 @@ def logs():
 
 
 @sysadmin_bp.route("/system-health", methods=["GET"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def system_health():
-    """System health check for SysAdmin"""
+    """System health check for ClientAdmin"""
     from flask import current_app
     import redis
     
@@ -207,7 +202,7 @@ def system_health():
 
 
 @sysadmin_bp.route("/b1-organization", methods=["GET"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def b1_organization():
     """B1 Organization Dashboard - Overview from Google Sheets"""
     from flask_jwt_extended import get_jwt_identity
@@ -235,7 +230,7 @@ def b1_organization():
         logger.info(f"[TRACE] Credentials file exists: {os.path.exists(creds_path)}")
         
         service = DashboardDataService(creds_path)
-        dashboard_data = service.get_sysadmin_b1_data(current_user_id)
+        dashboard_data = service.get_client_admin_b1_data(current_user_id)
         
         logger.info(f"[TRACE] B1 dashboard data - success: {dashboard_data.get('success')}, error: {dashboard_data.get('error', 'None')}")
         
@@ -251,7 +246,7 @@ def b1_organization():
 
 
 @sysadmin_bp.route("/b2-schedule-list", methods=["GET"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def b2_schedule_list():
     """B2 Schedule List Maintenance - List all schedules"""
     from flask_jwt_extended import get_jwt_identity
@@ -260,7 +255,7 @@ def b2_schedule_list():
     try:
         current_user_id = get_jwt_identity()
         service = DashboardDataService()
-        dashboard_data = service.get_sysadmin_b2_data(current_user_id)
+        dashboard_data = service.get_client_admin_b2_data(current_user_id)
         
         if dashboard_data.get("success"):
             return jsonify(dashboard_data), 200
@@ -274,7 +269,7 @@ def b2_schedule_list():
 
 
 @sysadmin_bp.route("/b3-schedule-maintenance", methods=["GET"])
-@role_required("SysAdmin")
+@role_required("ClientAdmin", "SysAdmin")
 def b3_schedule_maintenance():
     """B3 Schedule Maintenance - Detailed schedule sheets from Google Sheets"""
     from flask_jwt_extended import get_jwt_identity
@@ -287,7 +282,7 @@ def b3_schedule_maintenance():
         
         creds_path = current_app.config.get('GOOGLE_APPLICATION_CREDENTIALS', 'service-account-creds.json')
         service = DashboardDataService(creds_path)
-        dashboard_data = service.get_sysadmin_b3_data(current_user_id, schedule_def_id)
+        dashboard_data = service.get_client_admin_b3_data(current_user_id, schedule_def_id)
         
         if dashboard_data.get("success"):
             return jsonify(dashboard_data), 200
@@ -298,6 +293,5 @@ def b3_schedule_maintenance():
         logger = logging.getLogger(__name__)
         logger.error(f"Error in B3 dashboard: {e}")
         return jsonify({"error": str(e)}), 500
-
 
 

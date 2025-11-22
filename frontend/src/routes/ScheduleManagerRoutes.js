@@ -3,7 +3,6 @@ import ScheduleManagerLayout from '../layouts/ScheduleManagerLayout';
 import ProtectedRoute from './ProtectedRoute';
 import {
   Scheduling,
-  Run,
   Export,
 } from '../pages/ScheduleManager';
 import JobLogs from '../pages/ScheduleManager/JobLogs';
@@ -14,7 +13,6 @@ export default function ScheduleManagerRoutes() {
       <Routes>
         <Route path="/*" element={<ScheduleManagerLayout />}>
           <Route path="scheduling" element={<Scheduling />} />
-          <Route path="run" element={<Run />} />
           <Route path="export" element={<Export />} />
           <Route path="logs" element={<JobLogs />} />
           <Route index element={<Scheduling />} />

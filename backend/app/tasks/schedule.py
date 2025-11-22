@@ -12,7 +12,9 @@ from celery import current_task
 from sqlalchemy.orm import Session
 from ..database.connection import SessionLocal
 from ..models.schedule_task import ScheduleTask
-from ..core.config import settings
+
+# Get Google credentials from environment
+GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "service-account-creds.json")
 
 # Add the original app directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../"))
@@ -102,7 +104,7 @@ def process_schedule_task(
         elif input_source == "google_sheets":
             input_config_processed = {
                 "spreadsheet_url": input_config.get("spreadsheet_url"),
-                "credentials_path": input_config.get("credentials_path", settings.GOOGLE_CREDENTIALS_FILE)
+                "credentials_path": input_config.get("credentials_path", GOOGLE_CREDENTIALS_FILE)
             }
         else:
             raise ValueError(f"Unsupported input source: {input_source}")
@@ -119,7 +121,7 @@ def process_schedule_task(
         elif output_destination == "google_sheets":
             output_config_processed = {
                 "spreadsheet_url": output_config.get("spreadsheet_url"),
-                "credentials_path": output_config.get("credentials_path", settings.GOOGLE_CREDENTIALS_FILE)
+                "credentials_path": output_config.get("credentials_path", GOOGLE_CREDENTIALS_FILE)
             }
         else:
             raise ValueError(f"Unsupported output destination: {output_destination}")

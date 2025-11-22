@@ -23,7 +23,7 @@ class EmployeeMapping(db.Model):
     mappingID = db.Column(db.String(36), primary_key=True, unique=True, nullable=False)
     
     # Foreign Keys
-    userID = db.Column(db.String(36), db.ForeignKey('users.userID'), nullable=False, unique=True, index=True)
+    userID = db.Column(db.String(36), db.ForeignKey('users.userID'), nullable=True, unique=True, index=True)  # Nullable - can exist without user (available for registration)
     tenantID = db.Column(db.String(36), db.ForeignKey('tenants.tenantID'), nullable=False, index=True)
     
     # Mapping Fields
@@ -122,6 +122,13 @@ class EmployeeMapping(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'is_active': self.is_active
         }
+
+
+
+
+
+
+
 
 
 

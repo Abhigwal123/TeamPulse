@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models import ScheduleJobLog, User, ScheduleDefinition, SchedulePermission
+from app.utils.role_utils import is_sys_admin_role, is_client_admin_role, normalize_role, SYS_ADMIN_ROLE, CLIENT_ADMIN_ROLE
 try:
     from app.schemas import ScheduleJobLogSchema, ScheduleJobLogUpdateSchema, PaginationSchema, JobRunSchema
     SCHEMAS_AVAILABLE = True
@@ -14,6 +15,7 @@ except ImportError:
     JobRunSchema = None
 from datetime import datetime, timedelta
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +30,6 @@ def require_admin_or_scheduler():
     """Decorator to require admin or scheduler role"""
     def decorator(f):
         def decorated_function(*args, **kwargs):
-            # Skip check for OPTIONS requests (CORS preflight)
-            from flask import request
-            if request.method == "OPTIONS":
-                return f(*args, **kwargs)
-            
             user = get_current_user()
             # Allow ScheduleManager, Schedule_Manager, admin, and scheduler roles
             allowed_roles = ['admin', 'scheduler', 'ScheduleManager', 'Schedule_Manager']
@@ -43,22 +40,13 @@ def require_admin_or_scheduler():
         return decorated_function
     return decorator
 
-@schedule_job_log_bp.route('/', methods=['GET', 'OPTIONS'])
-@schedule_job_log_bp.route('', methods=['GET', 'OPTIONS'])  # Support both / and no slash
+@schedule_job_log_bp.route('/', methods=['GET'])
+@schedule_job_log_bp.route('', methods=['GET'])  # Support both / and no slash
 @jwt_required()
 def get_schedule_job_logs():
     """Get schedule job logs for current tenant"""
     import logging
     trace_logger = logging.getLogger('trace')
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        trace_logger.info("[TRACE] Backend: OPTIONS preflight for /schedule-job-logs")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     trace_logger.info("[TRACE] Backend: GET /schedule-job-logs")
     trace_logger.info(f"[TRACE] Backend: Path: {request.path}")
@@ -229,21 +217,12 @@ def create_schedule_job_log():
         logger.error(f"Create schedule job log error: {str(e)}")
         return jsonify({'error': 'Failed to create schedule job log', 'details': str(e)}), 500
 
-@schedule_job_log_bp.route('/run', methods=['POST', 'OPTIONS'])
+@schedule_job_log_bp.route('/run', methods=['POST'])
 @jwt_required()
 def run_schedule_job():
     """Run a schedule job"""
     import logging
     trace_logger = logging.getLogger('trace')
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        trace_logger.info("[TRACE] Backend: OPTIONS preflight for /schedule-job-logs/run")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
     
     trace_logger.info("[TRACE] Backend: POST /schedule-job-logs/run")
     
@@ -258,9 +237,15 @@ def run_schedule_job():
     
     try:
         current_user = get_current_user()
+        if not current_user:
+            response = jsonify({'error': 'User not found'})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 404
         
         data = request.get_json()
         trace_logger.info(f"[TRACE] Backend: Request data: {data}")
+        trace_logger.info(f"[DEBUG] Current user role: {current_user.role}")
+        trace_logger.info(f"[DEBUG] Current user tenantID: {current_user.tenantID}")
         
         if not data:
             response = jsonify({'error': 'No data provided'})
@@ -289,12 +274,37 @@ def run_schedule_job():
         if not schedule_def:
             return jsonify({'error': 'Schedule definition not found'}), 404
         
-        # Check tenant access
-        if current_user.tenantID != schedule_def.tenantID:
-            return jsonify({'error': 'Access denied'}), 403
+        trace_logger.info(f"[DEBUG] Schedule tenantID: {schedule_def.tenantID}")
+        
+        # Check tenant access (skip for SysAdmin and ClientAdmin as they have elevated permissions)
+        # Check role using normalized comparison
+        normalized_role = normalize_role(current_user.role)
+        is_client_admin = is_client_admin_role(current_user.role)
+        is_sys_admin = is_sys_admin_role(current_user.role)
+        
+        # Fallback: also check raw role string (case-insensitive) for edge cases
+        raw_role_lower = (current_user.role or '').lower().strip()
+        is_sys_admin_fallback = raw_role_lower in ['sysadmin', 'sys_admin', 'sys-admin']
+        is_client_admin_fallback = raw_role_lower in ['clientadmin', 'client_admin', 'client-admin', 'admin']
+        
+        is_admin_user = is_client_admin or is_sys_admin or is_sys_admin_fallback or is_client_admin_fallback
+        
+        trace_logger.info(f"[DEBUG] User role (raw): '{current_user.role}'")
+        trace_logger.info(f"[DEBUG] User role (normalized): '{normalized_role}'")
+        trace_logger.info(f"[DEBUG] Is ClientAdmin (function): {is_client_admin}")
+        trace_logger.info(f"[DEBUG] Is SysAdmin (function): {is_sys_admin}")
+        trace_logger.info(f"[DEBUG] Is SysAdmin (fallback): {is_sys_admin_fallback}")
+        trace_logger.info(f"[DEBUG] Is admin user (ClientAdmin or SysAdmin): {is_admin_user}")
+        
+        if not is_admin_user and current_user.tenantID != schedule_def.tenantID:
+            trace_logger.warning(f"[DEBUG] Tenant mismatch: user tenant {current_user.tenantID} != schedule tenant {schedule_def.tenantID}")
+            response = jsonify({'error': 'Access denied'})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 403
         
         # Check if user has permission to run this schedule
-        if not current_user.is_admin():
+        # Allow ClientAdmin and SysAdmin to run any schedule in their tenant
+        if not is_admin_user:
             # Try multiple methods to find permission
             permission = None
             try:
@@ -315,13 +325,19 @@ def run_schedule_job():
                 if current_user.role in ['ScheduleManager', 'Schedule_Manager'] and schedule_def.tenantID == current_user.tenantID:
                     trace_logger.info(f"[DEBUG] Allowing ScheduleManager to run schedule in their tenant")
                 else:
+                    trace_logger.warning(f"[DEBUG] Permission denied: user {current_user.userID} ({current_user.role}) cannot run schedule {schedule_def_id}")
                     response = jsonify({'error': 'Permission denied to run this schedule'})
                     response.headers.add("Access-Control-Allow-Origin", "*")
                     return response, 403
             elif hasattr(permission, 'is_valid') and not permission.is_valid():
+                trace_logger.warning(f"[DEBUG] Permission expired or invalid for user {current_user.userID}")
                 response = jsonify({'error': 'Permission expired or invalid'})
                 response.headers.add("Access-Control-Allow-Origin", "*")
                 return response, 403
+        else:
+            # Admin users (ClientAdmin or SysAdmin) can run schedules
+            trace_logger.info(f"[DEBUG] Allowing {current_user.role} (admin user) to run schedule {schedule_def_id} (admin privilege)")
+            logger.info(f"[INFO] Admin user {current_user.username} ({current_user.role}) running schedule {schedule_def.scheduleName}")
         
         # Create job log
         job_log = ScheduleJobLog(
@@ -341,16 +357,42 @@ def run_schedule_job():
         
         # Enqueue the job for background processing via Celery
         from flask import current_app as flask_app
-        from celery import current_app as celery_current_app
         
+        # Get Celery instance - try multiple methods
+        celery_app = None
         try:
-            celery_app = celery_current_app
-            if not celery_app:
-                raise AttributeError("Celery not initialized")
-        except (AttributeError, RuntimeError):
-            # Fallback: try to get from extensions
-            from app.extensions import celery
-            celery_app = celery
+            # Method 1: Try to get from Flask app extensions
+            if hasattr(flask_app, 'extensions') and 'celery' in flask_app.extensions:
+                celery_app = flask_app.extensions['celery']
+        except Exception as e:
+            trace_logger.warning(f"[DEBUG] Failed to get Celery from Flask extensions: {e}")
+        
+        if not celery_app:
+            try:
+                # Method 2: Try to get from celery current_app
+                from celery import current_app as celery_current_app
+                celery_app = celery_current_app
+                # Verify it's actually initialized (not just a placeholder)
+                if celery_app and hasattr(celery_app, 'tasks'):
+                    test_tasks = list(celery_app.tasks.keys())
+                    if not test_tasks:
+                        celery_app = None  # Not properly initialized
+            except (AttributeError, RuntimeError, Exception) as e:
+                trace_logger.warning(f"[DEBUG] Failed to get Celery from current_app: {e}")
+                celery_app = None
+        
+        if not celery_app:
+            try:
+                # Method 3: Try to get from extensions module
+                from app.extensions import celery as ext_celery
+                if ext_celery and hasattr(ext_celery, 'tasks'):
+                    celery_app = ext_celery
+            except Exception as e:
+                trace_logger.warning(f"[DEBUG] Failed to get Celery from extensions module: {e}")
+        
+        if not celery_app:
+            trace_logger.warning(f"[DEBUG] Celery not available - will use synchronous fallback")
+            logger.warning(f"[WARNING] Celery not initialized - schedule will run synchronously")
         
         # Try to use registered Celery tasks
         task_id = None
@@ -392,45 +434,88 @@ def run_schedule_job():
             if task_name:
                 trace_logger.info(f"[DEBUG] Triggering Celery Task: {task_name}")
                 trace_logger.info(f"[DEBUG] Job Params: schedule={schedule_def.scheduleName}, logID={job_log.logID}")
+                trace_logger.info(f"[DEBUG] Schedule Config: schedule_def_id={schedule_config.get('schedule_def_id')}, job_log_id={schedule_config.get('job_log_id')}")
                 
+                # Check if Celery worker is actually running and can process tasks
+                worker_available = False
                 try:
-                    task = celery_app.send_task(
-                        task_name,
-                        args=[schedule_config] if task_name == 'celery_tasks.execute_scheduling_task' else schedule_config,
-                        kwargs={'job_log_id': job_log.logID} if task_name == 'celery_tasks.execute_scheduling_task' else {}
-                    )
-                    task_id = task.id
-                    task_enqueued = True
-                    
-                    # Store Celery task ID in job log metadata
-                    job_log.add_metadata('celery_task_id', task_id)
-                    job_log.status = 'running'
-                    db.session.commit()
-                    
-                    logger.info(f"[INFO] Schedule job queued: {job_log.logID}, Celery task: {task_id} for schedule {schedule_def.scheduleName} by user: {current_user.username}")
-                    trace_logger.info(f"[DEBUG] Response: {{status: running, job_id: {task_id}, message: Schedule job started successfully}}")
-                except Exception as celery_error:
-                    trace_logger.error(f"[DEBUG] Celery task failed: {celery_error}")
-                    logger.error(f"Failed to enqueue Celery task: {celery_error}")
-                    # Fall through to fallback
+                    # Try to inspect active workers
+                    inspect = celery_app.control.inspect()
+                    active_workers = inspect.active()
+                    if active_workers:
+                        worker_available = True
+                        trace_logger.info(f"[DEBUG] ✅ Celery workers detected: {list(active_workers.keys())}")
+                    else:
+                        trace_logger.warning(f"[DEBUG] ⚠️ No active Celery workers detected")
+                except Exception as inspect_error:
+                    trace_logger.warning(f"[DEBUG] ⚠️ Could not inspect Celery workers: {inspect_error}")
+                    # Assume worker might be available but inspection failed
+                    worker_available = True  # Give it a chance
+                
+                if not worker_available:
+                    trace_logger.warning(f"[DEBUG] ⚠️ Celery worker not available - will use synchronous execution")
+                    logger.warning(f"[WARNING] ⚠️ Celery worker not running - will use synchronous execution")
+                    # Don't try to enqueue if worker is not available
+                    task_enqueued = False
+                else:
+                    try:
+                        # Prepare task arguments based on task type
+                        if task_name == 'celery_tasks.execute_scheduling_task':
+                            task_args = [schedule_config]
+                            task_kwargs = {'job_log_id': job_log.logID}
+                        else:
+                            task_args = schedule_config if isinstance(schedule_config, tuple) else [schedule_config]
+                            task_kwargs = {}
+                        
+                        trace_logger.info(f"[DEBUG] Sending task with args={len(task_args)} items, kwargs={task_kwargs}")
+                        
+                        task = celery_app.send_task(
+                            task_name,
+                            args=task_args,
+                            kwargs=task_kwargs
+                        )
+                        task_id = task.id
+                        task_enqueued = True
+                        
+                        # Store Celery task ID in job log metadata
+                        job_log.add_metadata('celery_task_id', task_id)
+                        job_log.status = 'running'
+                        db.session.commit()
+                        
+                        logger.info(f"[INFO] ✅ Schedule job queued successfully: job_log={job_log.logID}, celery_task={task_id}, schedule={schedule_def.scheduleName}, user={current_user.username} ({current_user.role})")
+                        logger.info(f"[INFO] ✅ Task will execute run_refactored.py via Celery worker")
+                        trace_logger.info(f"[DEBUG] ✅ Task enqueued: task_id={task_id}, status=running")
+                    except Exception as celery_error:
+                        import traceback
+                        error_trace = traceback.format_exc()
+                        trace_logger.error(f"[DEBUG] ❌ Celery task enqueue failed: {celery_error}")
+                        trace_logger.error(f"[DEBUG] Error traceback: {error_trace}")
+                        logger.error(f"❌ Failed to enqueue Celery task: {celery_error}")
+                        logger.error(f"Error traceback: {error_trace}")
+                        # Fall through to fallback
+                        task_enqueued = False
             else:
-                trace_logger.warning(f"[DEBUG] No suitable Celery task found. Available tasks: {registered_tasks}")
-                logger.warning(f"No suitable Celery task found for scheduling")
+                trace_logger.warning(f"[DEBUG] ⚠️ No suitable Celery task found. Available tasks: {registered_tasks}")
+                trace_logger.warning(f"[DEBUG] Looking for: 'celery_tasks.execute_scheduling_task' or 'async_run_schedule'")
+                logger.warning(f"⚠️ No suitable Celery task found for scheduling. Available: {registered_tasks}")
         
         if not task_enqueued:
-            # Fallback: execute synchronously
+            # Fallback: execute synchronously in background thread
+            # This ensures run_refactored.py executes even if Celery worker is not running
             from app.services.schedule_executor import execute_schedule_task_sync
             
-            trace_logger.info(f"[DEBUG] Falling back to synchronous execution")
-            logger.info(f"[INFO] Executing schedule task synchronously for job: {job_log.logID}")
+            trace_logger.info(f"[DEBUG] ⚠️ Falling back to synchronous execution (Celery worker not available)")
+            logger.warning(f"[WARNING] ⚠️ Celery worker not available - using synchronous execution for job: {job_log.logID}")
+            logger.info(f"[INFO] 🔄 Will execute run_refactored.py synchronously in background thread")
+            logger.info(f"[INFO] This ensures the schedule runs even without Celery worker")
             
-            # Execute in background thread or synchronously
+            # Execute in background thread to avoid blocking the HTTP response
             try:
                 # Mark as running first
                 job_log.start_job()
                 db.session.commit()
                 
-                # Execute synchronously (for now - in production, use threading)
+                # Prepare schedule config for run_refactored.py execution
                 schedule_config_fallback = {
                     'input_source': 'google_sheets',
                     'input_config': {
@@ -446,21 +531,44 @@ def run_schedule_job():
                     'job_log_id': job_log.logID
                 }
                 
-                # Execute in a thread to avoid blocking the response
+                # Execute in a background thread to avoid blocking the HTTP response
+                # The thread will run run_refactored.py and update job status
                 import threading
+                # CRITICAL: Capture os from module level to avoid UnboundLocalError in nested function
+                # Python's closure mechanism requires explicit capture for nested functions
+                _os_module = os  # Capture module-level os import
+                def run_schedule_in_thread():
+                    try:
+                        logger.info(f"[INFO] 🔄 Starting run_refactored.py execution in background thread for job {job_log.logID}")
+                        logger.info(f"[INFO] This will fetch all sheets from input and write to output")
+                        success = execute_schedule_task_sync(schedule_config_fallback, job_log.logID)
+                        if success:
+                            logger.info(f"[INFO] ✅ run_refactored.py completed successfully for job {job_log.logID}")
+                        else:
+                            logger.error(f"[ERROR] ❌ run_refactored.py failed for job {job_log.logID}")
+                    except Exception as thread_error:
+                        import traceback
+                        logger.error(f"[ERROR] ❌ Error in background thread: {thread_error}")
+                        logger.error(f"[ERROR] Traceback: {traceback.format_exc()}")
+                
                 thread = threading.Thread(
-                    target=execute_schedule_task_sync,
-                    args=(schedule_config_fallback, job_log.logID),
-                    daemon=True
+                    target=run_schedule_in_thread,
+                    daemon=False  # Not daemon so it completes even if main thread exits
                 )
                 thread.start()
                 
-                trace_logger.info(f"[DEBUG] Synchronous execution started in background thread")
+                trace_logger.info(f"[DEBUG] ✅ Synchronous execution started in background thread for job {job_log.logID}")
+                logger.info(f"[INFO] ✅ Background thread started - run_refactored.py will execute now")
+                logger.info(f"[INFO] Job status will update to 'completed' when run_refactored.py finishes")
             except Exception as fallback_error:
-                logger.error(f"[ERROR] Synchronous execution failed: {fallback_error}")
-                trace_logger.error(f"[DEBUG] Fallback execution error: {fallback_error}")
+                import traceback
+                error_trace = traceback.format_exc()
+                logger.error(f"[ERROR] ❌ Synchronous execution setup failed: {fallback_error}")
+                logger.error(f"Error traceback: {error_trace}")
+                trace_logger.error(f"[DEBUG] ❌ Fallback execution error: {fallback_error}")
+                trace_logger.error(f"[DEBUG] Error traceback: {error_trace}")
                 job_log.status = 'failed'
-                job_log.error_message = f"Execution failed: {str(fallback_error)}"
+                job_log.error_message = f"Execution setup failed: {str(fallback_error)}"
                 db.session.commit()
         
         trace_logger.info(f"[TRACE] Backend: Job created - logID: {job_log.logID}, status: {job_log.status}")
@@ -617,7 +725,7 @@ def cancel_schedule_job(log_id):
         logger.error(f"Cancel schedule job error: {str(e)}")
         return jsonify({'error': 'Failed to cancel schedule job', 'details': str(e)}), 500
 
-@schedule_job_log_bp.route('/<log_id>/export', methods=['GET', 'OPTIONS'])
+@schedule_job_log_bp.route('/<log_id>/export', methods=['GET'])
 def export_schedule_job(log_id):
     """Export schedule results for a completed job as CSV"""
     import csv
@@ -628,14 +736,6 @@ def export_schedule_job(log_id):
     logger.info(f"[EXPORT] Export request: method={request.method}, log_id={log_id}, path={request.path}")
     
     # Handle CORS preflight - must be before @jwt_required to avoid 404
-    if request.method == "OPTIONS":
-        logger.info(f"[EXPORT] Handling OPTIONS preflight for log_id={log_id}")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        return response
-    
     # Require JWT for actual GET request
     from flask_jwt_extended import verify_jwt_in_request
     try:

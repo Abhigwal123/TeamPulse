@@ -5,39 +5,107 @@ Integration module to bridge the original scheduling system with the SaaS backen
 import os
 import sys
 import shutil
+import logging
 from typing import Dict, Any, Optional
 from pathlib import Path
 
-# Add the original app directory to Python path
-original_app_path = Path(__file__).parent.parent.parent / "app"
-if str(original_app_path) not in sys.path:
-    sys.path.insert(0, str(original_app_path))
+# 🔧 CRITICAL: Setup Python path BEFORE any imports
+# Calculate project root: backend/app/scheduling/integration.py -> project root
+integration_file = Path(__file__).resolve()
+backend_dir = integration_file.parent.parent.parent  # backend/
+project_root = backend_dir.parent  # project root (parent of backend/)
+
+# CRITICAL: Remove app_dir from sys.path if it exists (it breaks package imports)
+# Something else might have added it (e.g., Google Sheets service loader)
+app_dir = project_root / "app"
+app_dir_str = str(app_dir)
+if app_dir_str in sys.path:
+    sys.path.remove(app_dir_str)
+
+# Add project root to sys.path FIRST (highest priority)
+# This allows "from app.*" imports to work (app is a package in project root)
+# DO NOT add app_dir to sys.path - that breaks package imports!
+project_root_str = str(project_root)
+if project_root_str not in sys.path:
+    sys.path.insert(0, project_root_str)
+
+# Log path setup for debugging
+logger = logging.getLogger(__name__)
+logger.info(f"[INTEGRATION] Project root: {project_root_str}")
+logger.info(f"[INTEGRATION] App package location: {app_dir_str}")
+logger.info(f"[INTEGRATION] sys.path[0:3]: {sys.path[0:3]}")
+logger.info(f"[INTEGRATION] ✅ Project root added to sys.path - 'from app.*' imports should work")
+
+# Now import with explicit error handling - DO NOT hide ImportError
+try:
+    # Import run_refactored from project root
+    logger.info(f"[INTEGRATION] Attempting to import run_refactored from project root...")
+    from run_refactored import run_schedule_task
+    logger.info(f"[INTEGRATION] ✅ Successfully imported run_schedule_task from run_refactored")
+except ImportError as e:
+    logger.error(f"[INTEGRATION] ❌ FAILED to import run_refactored: {e}")
+    logger.error(f"[INTEGRATION] Current sys.path: {sys.path[:5]}")
+    raise ImportError(f"Cannot import run_refactored. Project root: {project_root_str}, Error: {e}")
 
 try:
-    from run_refactored import run_schedule_task
-    from app.data_provider import create_data_provider
-    from app.data_writer import create_data_writer, write_all_results_to_excel, write_all_results_to_google_sheets
-    from app.schedule_cpsat import process_input_data, solve_cpsat
-    from app.schedule_helpers import (
-        build_rows, build_daily_analysis_report, check_hard_constraints, 
-        check_soft_constraints, generate_soft_constraint_report, 
-        create_schedule_chart, debug_schedule
-    )
-    from app.utils.logger import setup_logging, get_logger
+    # Import legacy app modules
+    # NOTE: We need to import root app modules directly using importlib because after run_refactored
+    # restores the backend app in sys.modules, direct imports would find backend modules instead
+    logger.info(f"[INTEGRATION] Attempting to import app.* modules...")
+    import importlib.util
+    
+    # Import root app.utils.logger directly from file path to avoid backend app conflict
+    root_logger_path = app_dir / "utils" / "logger.py"
+    if root_logger_path.exists():
+        spec = importlib.util.spec_from_file_location("root_app_utils_logger", str(root_logger_path))
+        if spec and spec.loader:
+            root_logger_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(root_logger_module)
+            setup_logging = root_logger_module.setup_logging
+            get_logger = root_logger_module.get_logger
+        else:
+            raise ImportError(f"Could not load root app logger from {root_logger_path}")
+    else:
+        raise ImportError(f"Root app logger not found at {root_logger_path}")
+    
+    # Import other root app modules - these are available from run_refactored which was already imported
+    # We don't need to import them here since run_schedule_task from run_refactored handles everything
+    # But we keep the imports for backward compatibility and in case they're needed directly
+    try:
+        from app.data_provider import create_data_provider
+        from app.data_writer import create_data_writer, write_all_results_to_excel, write_all_results_to_google_sheets
+        from app.schedule_cpsat import process_input_data, solve_cpsat
+        from app.schedule_helpers import (
+            build_rows, build_daily_analysis_report, check_hard_constraints, 
+            check_soft_constraints, generate_soft_constraint_report, 
+            create_schedule_chart, debug_schedule
+        )
+    except ImportError as import_err:
+        # These imports may fail if backend app is in sys.modules, but that's OK
+        # because run_schedule_task from run_refactored already has access to them
+        logger.warning(f"[INTEGRATION] Could not import some root app modules directly: {import_err}")
+        logger.warning(f"[INTEGRATION] This is OK - run_schedule_task from run_refactored will handle them")
+        # Set to None so code can check if they're available
+        create_data_provider = None
+        create_data_writer = None
+        write_all_results_to_excel = None
+        write_all_results_to_google_sheets = None
+        process_input_data = None
+        solve_cpsat = None
+        build_rows = None
+        build_daily_analysis_report = None
+        check_hard_constraints = None
+        check_soft_constraints = None
+        generate_soft_constraint_report = None
+        create_schedule_chart = None
+        debug_schedule = None
+    
+    logger.info(f"[INTEGRATION] ✅ Successfully imported root app logger modules")
 except ImportError as e:
-    print(f"Warning: Could not import original scheduling modules: {e}")
-    # Create dummy functions for development
-    def run_schedule_task(*args, **kwargs):
-        return {"error": "Original scheduling modules not available"}
-    
-    def create_data_provider(*args, **kwargs):
-        return None
-    
-    def process_input_data(*args, **kwargs):
-        return {}
-    
-    def solve_cpsat(*args, **kwargs):
-        return {"error": "Solver not available"}
+    logger.error(f"[INTEGRATION] ❌ FAILED to import app.* modules: {e}")
+    logger.error(f"[INTEGRATION] App dir exists: {app_dir.exists()}")
+    logger.error(f"[INTEGRATION] App dir contents: {list(app_dir.iterdir())[:10] if app_dir.exists() else 'N/A'}")
+    raise ImportError(f"Cannot import app.* modules. App dir: {app_dir_str}, Error: {e}")
 
 
 def run_scheduling_task_saas(
@@ -69,12 +137,10 @@ def run_scheduling_task_saas(
         Dictionary containing results and status
     """
     
-    # Setup logging with file handler
-    log_file = "logs/system.log" if user_id and task_id else None
-    setup_logging(level=log_level, log_file=log_file)
+    # Setup logging
+    setup_logging(level=log_level)
     logger = get_logger(__name__)
     logger.info(f"Starting SaaS scheduling task for user {user_id}, task {task_id}")
-    logger.info(f"Input: {input_source} -> Output: {output_destination}")
     
     try:
         # Create user-specific directories
@@ -99,7 +165,12 @@ def run_scheduling_task_saas(
                 output_config = output_config.copy()
                 output_config["output_path"] = new_path
         
-        # Run the original scheduling task
+        # Run the original scheduling task (run_refactored.py)
+        logger.info(f"[INTEGRATION] 🔄 Calling run_schedule_task from run_refactored.py...")
+        logger.info(f"[INTEGRATION] Input: {input_source}, Output: {output_destination}")
+        logger.info(f"[INTEGRATION] Input URL: {input_config.get('spreadsheet_url', 'N/A')}")
+        logger.info(f"[INTEGRATION] Output URL: {output_config.get('spreadsheet_url', 'N/A')}")
+        
         result = run_schedule_task(
             input_source=input_source,
             input_config=input_config,
@@ -110,18 +181,25 @@ def run_scheduling_task_saas(
             log_level=log_level
         )
         
+        logger.info(f"[INTEGRATION] ✅ run_schedule_task completed")
+        logger.info(f"[INTEGRATION] Result type: {type(result)}")
+        logger.info(f"[INTEGRATION] Result has error: {bool(result.get('error') if isinstance(result, dict) else False)}")
+        
         # Add SaaS-specific metadata
         if isinstance(result, dict) and "error" not in result:
             result["user_id"] = user_id
             result["task_id"] = task_id
             result["saas_version"] = "2.0.0"
         
-        logger.info(f"SaaS scheduling task completed for user {user_id}, task {task_id}")
+        logger.info(f"[INTEGRATION] ✅ SaaS scheduling task completed for user {user_id}, task {task_id}")
         return result
         
     except Exception as e:
-        logger.error(f"Error in SaaS scheduling task: {e}")
-        return {"error": str(e)}
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error(f"[INTEGRATION] ❌ Error in SaaS scheduling task: {e}")
+        logger.error(f"[INTEGRATION] Error traceback: {error_trace}")
+        return {"error": str(e), "status": "error"}
 
 
 def validate_input_config(input_source: str, input_config: Dict[str, Any]) -> bool:

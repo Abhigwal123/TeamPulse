@@ -64,7 +64,8 @@ export default function OrganizationMaintenance() {
       setError('');
       
       console.log('[TRACE] Frontend: Loading tenants data');
-      console.log('[TRACE] Frontend: API base URL:', import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1');
+      // Hard-set API base URL to match backend CORS settings
+      console.log('[TRACE] Frontend: API base URL: http://127.0.0.1:8000/api/v1');
       
       const response = await tenantService.getAll(1, 100);
       console.log('[TRACE] Frontend: Tenants response type:', typeof response);
@@ -229,7 +230,7 @@ export default function OrganizationMaintenance() {
 
       {error && (
         <div className="mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+          {typeof error === 'string' ? error : (error?.message || error?.error || String(error) || '發生錯誤')}
         </div>
       )}
 

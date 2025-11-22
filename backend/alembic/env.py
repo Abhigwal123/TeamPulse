@@ -12,21 +12,22 @@ import sys
 # Add the app directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from app.database.connection import Base
-# Import all models so Alembic can detect them
-# Note: Import the Flask-SQLAlchemy models (they use db.Model)
-from app import db
+# Import Flask app and get metadata from Flask-SQLAlchemy
+from app import create_app
+from app.extensions import db
+
+# Create Flask app to initialize models
+app = create_app()
+
+# Import all models to register them with SQLAlchemy
 from app.models import (
-    User, Tenant, Department, ScheduleDefinition, SchedulePermission,
-    ScheduleJobLog, EmployeeMapping, CachedSheetData, CachedSchedule, SyncLog
+    Tenant, User, Department, ScheduleDefinition,
+    SchedulePermission, ScheduleJobLog, EmployeeMapping,
+    CachedSheetData, CachedSchedule, SyncLog, ScheduleTask
 )
-# Import schedule model that uses Base (SQLAlchemy declarative base)
-try:
-    from app.models.schedule import Schedule
-except ImportError:
-    pass
-# Note: ScheduleTask has incompatible FK (references users.id but User uses userID)
-# We'll skip it for this migration since we're only adding CachedSchedule and SyncLog
+
+# Use Flask-SQLAlchemy's metadata for Alembic
+target_metadata = db.metadata
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -36,10 +37,6 @@ config = context.config
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
-
-# add your model's MetaData object here
-# for 'autogenerate' support
-target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
